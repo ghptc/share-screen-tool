@@ -31,7 +31,7 @@ The manual player starts a separate loopback frontend on port 5191, backend on 1
 2. Each control request checks the origin, session, peer, room and membership. The browser can request one sending video transceiver or subscribe to an available publication handle. The backend owns all SFU session IDs and chooses the upstream operations. It checks partial track errors and refuses redirects.
 3. A lock reserves one of four publisher slots before allocating the upstream session. Pending publications and failed closures occupy slots. The sender announces readiness after ICE/DTLS connects. Additional authorized users can subscribe. A user does not subscribe to their own publications.
 4. Each subscription gets a separate receiving PeerConnection. The SFU supplies its offer and the browser returns an answer. This trades extra peer connections for simple independent closure. The prototype uses Cloudflare's public STUN endpoint. Restrictive networks requiring TURN still need validation. [Browser connection recipes](https://developers.cloudflare.com/realtime/sfu/get-started/connection-patterns/)
-5. A voice-state monitor rechecks active sessions every three seconds. A detected departure withdraws the publication and queues forced provider-side closure of its sending and receiving flows. A viewer departure closes that viewer's subscriptions. Unrenewed media leases expire after 20 seconds plus monitor scheduling. Provider failures retain the closure for retry. Previously received frames may remain buffered. [Track closure](https://developers.cloudflare.com/realtime/sfu/api/)
+5. A voice-state monitor rechecks active sessions every three seconds. A detected departure withdraws the publication and queues forced provider-side closure of its sending and receiving flows. A viewer departure closes that viewer's subscriptions. Unrenewed media leases expire after 20 seconds plus monitor scheduling. The backend releases the slot when Cloudflare confirms closure of the requested track or reports that its session has ended (HTTP 410 with `session_error`). Ambiguous responses keep the slot reserved for retry. Previously received frames may remain buffered. [Track closure](https://developers.cloudflare.com/realtime/sfu/api/) · [Provider error codes](https://developers.cloudflare.com/realtime/sfu/observability/error-codes/)
 
 ## Public-release blockers
 
@@ -39,7 +39,7 @@ The backend accepts `WHITERUN_MEDIA_TRANSPORT=cloudflare-prototype` only on a lo
 
 The prototype tracks pending mutations, closures and slot ownership in memory. A backend crash can lose the identifiers needed to revoke continuously flowing media. A prolonged outage can delay closure. Cloudflare's 30-second inactivity timeout applies to tracks receiving no media. It does not terminate a live flow because an application heartbeat stopped. Before public admission, persist ownership and pending closures, reconcile them on restart, test actual provider-side cessation during partitions, and coordinate slots across backend instances. [Resource limits and timeouts](https://developers.cloudflare.com/realtime/sfu/platform/limits/)
 
-Hosted two-way video, private-guild OAuth/Gateway sign-off, restrictive-network connectivity, real desktop FPS, native audio publication through Cloudflare and physical HyperX listening remain separate acceptance checks. Keep the release player on LiveKit until these pass.
+Private-guild OAuth/Gateway sign-off, restrictive-network connectivity, real desktop FPS, native audio publication through Cloudflare and physical HyperX listening remain separate acceptance checks. Keep the release player on LiveKit until these pass.
 
 ## Native PipeWire audio
 
@@ -60,4 +60,5 @@ The Connection API allows 50 requests per second per session and up to 64 tracks
 | Backend authorization and SFU contract | Race-tested copied-link denial, wrong channel, other session's peer, self-subscription, extra media sections, channel switch, cached session denial, four of eight concurrent reservations and closure retries. |
 | Native Opus feasibility | 25 generated stereo Opus frames traversed a local Pion connection with byte-identical payloads and consecutive 960-tick RTP steps. |
 | Existing LiveKit quality regression | Generated receiver sample at 1280×720, 29.7 decoded FPS, VP8, zero dropped frames and zero measured packet loss. |
-| Hosted Cloudflare media | Pending. Neither required SFU variable was present in the checkout's protected environment during this run. |
+| Hosted Cloudflare SFU, Chromium | Two simultaneous publishers decoded 12 and 13 remote frames at 320×180. Explicit stop and simulated voice departure passed. Zero pending provider closures at teardown. |
+| Hosted Cloudflare SFU, Firefox | Both publishers decoded 12 remote frames at 320×180. Explicit stop and simulated voice departure passed. Zero pending provider closures at teardown. |
