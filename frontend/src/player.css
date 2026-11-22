@@ -86,3 +86,6 @@ main.player {
 .player .share-audio-toggle input { width: 15px; height: 15px; padding: 0; margin: 0; accent-color: var(--accent); cursor: pointer; }
 .player-popover .share-audio-toggle { padding: 0; }
 .player-popover .share-audio-toggle + .source-picker { margin-top: 13px; }
+
+.player-dock > select { max-width: 10em; min-width: 0; width: auto; padding: 6px; background: #24262a; color: var(--ink); border: 1px solid var(--line); border-radius: 6px; }
+.player-grid[data-count="3"][data-focused="false"] > :first-child { grid-row: span 2; }

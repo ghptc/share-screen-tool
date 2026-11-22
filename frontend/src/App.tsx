@@ -59,7 +59,7 @@ function Player() {
         if (!response.ok) throw new Error()
         const credentials: JoinResult = await response.json()
         if (controller.signal.aborted) return
-        const current = new Room({ adaptiveStream: true, dynacast: true })
+        const current = new Room({ adaptiveStream: false, dynacast: true })
         room = current
         current.on(RoomEvent.ConnectionStateChanged, connectionChanged)
         await current.connect(credentials.serverUrl, credentials.token, { autoSubscribe: true })

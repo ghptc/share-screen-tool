@@ -56,6 +56,12 @@ export default function PlayerStage({
   start,
   stop,
 }: Props) {
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  useEffect(() => {
+    const sync = () => setIsFullscreen(Boolean(document.fullscreenElement))
+    document.addEventListener('fullscreenchange', sync)
+    return () => document.removeEventListener('fullscreenchange', sync)
+  }, [])
   const [focus, setFocus] = useState('')
   const [menu, setMenu] = useState(false)
   const [audioState, setAudioState] = useState('')
@@ -151,6 +157,7 @@ export default function PlayerStage({
               screen={s}
               connected={connected}
               hidden={focused && s.key !== focus}
+              highest={screens.length === 1 || (focused ? s.key === focus : isFullscreen)}
               onFocus={() =>
                 screens.length === 1 ? void fullscreen() : setFocus(s.key === focus ? '' : s.key)
               }
@@ -178,6 +185,9 @@ export default function PlayerStage({
             Back to grid
           </button>
         )}
+        {focused && <select aria-label="Focused screen" value={focus} onChange={e => setFocus(e.target.value)}>
+          {screens.map(s => <option value={s.key} key={s.key}>{s.owner}</option>)}
+        </select>}
         {canPublish && (
           <button
             className={'share-action' + (sharing ? ' active' : '')}

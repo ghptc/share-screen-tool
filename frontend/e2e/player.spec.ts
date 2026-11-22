@@ -231,6 +231,8 @@ test('four simultaneous screen slots admit viewers and recover after departure',
     await start(loser)
     await expect(tiles(viewer)).toHaveCount(4)
     expect(await viewer.evaluate(() => window.__screenTest.calls)).toBe(0)
+    for (const p of pages.slice(1)) await p.getByRole('button', { name: 'Stop sharing' }).click()
+    await expect(tiles(viewer)).toHaveCount(0)
   } finally {
     await Promise.all(contexts.map(c => c.close()))
   }
