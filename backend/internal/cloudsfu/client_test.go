@@ -119,3 +119,44 @@ func TestPrototypeProfile(t *testing.T) {
 		t.Fatal("explicit prototype denied")
 	}
 }
+
+func TestCloseRequiresTerminalProviderEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name, mid string
+		status    int
+		response  string
+		closed    bool
+	}{
+		{"already ended session", "0", 410, `{"errorCode":"session_error"}`, true},
+		{"ended session during mid recovery", "", 410, `{"errorCode":"session_error"}`, true},
+		{"track was closed", "0", 200, `{"tracks":[{"mid":"0","errorCode":"close_track_error"}]}`, true},
+		{"session still connecting", "0", 425, `{"errorCode":"session_error"}`, false},
+		{"missing app", "0", 404, `{"errorCode":"not_found"}`, false},
+		{"missing app during mid recovery", "", 404, `{"errorCode":"not_found"}`, false},
+		{"ambiguous gone", "0", 410, `{}`, false},
+		{"malformed gone", "0", 410, `{"errorCode":"session_error"}truncated`, false},
+		{"unavailable upstream", "0", 503, `{"errorCode":"session_error"}`, false},
+		{"wrong mid", "0", 200, `{"tracks":[{"mid":"1","errorCode":"close_track_error"}]}`, false},
+		{"request error", "0", 200, `{"errorCode":"close_track_error"}`, false},
+		{"unresolved track", "0", 200, `{"tracks":[{"mid":"0","errorCode":"internal_error"}]}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				verb := "PUT"
+				if tc.mid == "" {
+					verb = "GET"
+				}
+				if r.Method != verb {
+					t.Errorf("unexpected method %s", r.Method)
+				}
+				w.WriteHeader(tc.status)
+				w.Write([]byte(tc.response))
+			}))
+			defer srv.Close()
+			c := Client{base: srv.URL, http: srv.Client()}
+			if err := c.Close(t.Context(), "test-session", tc.mid); (err == nil) != tc.closed {
+				t.Fatalf("closed = %t, want %t", err == nil, tc.closed)
+			}
+		})
+	}
+}

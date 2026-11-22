@@ -26,6 +26,7 @@ var resourceID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 var appID = regexp.MustCompile(`^[a-fA-F0-9]{32}$`)
 var bearer = regexp.MustCompile(`^[a-zA-Z0-9_~.+/=-]{16,512}$`)
 var errResponse = errors.New("unexpected SFU response")
+var errSessionGone = errors.New("SFU session ended")
 
 type Client struct {
 	base, secret string
@@ -54,7 +55,6 @@ type track struct {
 	Mid      string `json:"mid,omitempty"`
 	Error    string `json:"errorCode,omitempty"`
 	Status   string `json:"status,omitempty"`
-	Detail   string `json:"errorDescription,omitempty"`
 }
 type message struct {
 	ID          string       `json:"sessionId,omitempty"`
@@ -88,6 +88,18 @@ func (c *Client) call(ctx context.Context, method, path string, input *message) 
 		return out, errors.New("SFU connection failed")
 	}
 	defer res.Body.Close()
+	if res.StatusCode == http.StatusGone {
+		// A session_error with 410 means this session can no longer carry media.
+		// Other errors (including a generic proxy 410) provide no closure evidence.
+		var problem struct {
+			Code string `json:"errorCode"`
+		}
+		const maxProblemBytes = 8 << 10
+		body, readErr := io.ReadAll(io.LimitReader(res.Body, maxProblemBytes+1))
+		if readErr == nil && len(body) <= maxProblemBytes && json.Unmarshal(body, &problem) == nil && problem.Code == "session_error" {
+			return out, errSessionGone
+		}
+	}
 	if res.StatusCode/100 != 2 {
 		return out, apiStatus(res.StatusCode)
 	}
@@ -145,7 +157,7 @@ func (c *Client) Close(ctx context.Context, id, mid string) error {
 	}
 	if mid == "" {
 		out, err := c.call(ctx, "GET", "/"+id, nil)
-		if err == apiStatus(404) {
+		if err == errSessionGone {
 			return nil
 		}
 		if err != nil {
@@ -163,16 +175,18 @@ func (c *Client) Close(ctx context.Context, id, mid string) error {
 		return errResponse
 	}
 	out, err := c.call(ctx, "PUT", "/"+id+"/tracks/close", &message{Tracks: []track{{Mid: mid}}, Force: true})
-	if err == apiStatus(404) {
+	if err == errSessionGone {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if len(out.Tracks) == 1 && out.Tracks[0].Mid == mid && out.Tracks[0].Error == "close_track_error" && out.Tracks[0].Detail == "Track doesn't exist or was already closed" {
-		return nil
+
+	if len(out.Tracks) != 1 || out.Tracks[0].Mid != mid {
+		return errResponse
 	}
-	if len(out.Tracks) != 1 || out.Tracks[0].Mid != mid || out.Tracks[0].Error != "" {
+	// The item code identifies an absent or previously closed track. The description is free text.
+	if code := out.Tracks[0].Error; code != "" && code != "close_track_error" {
 		return errResponse
 	}
 	return nil
