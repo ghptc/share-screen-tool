@@ -63,7 +63,7 @@ export async function publishGameAudio(
     })()
     await audioPost(
       '/player/start',
-      { source, code: pair.code },
+      { source: source.split(',')[0], additional: source.split(',').slice(1), code: pair.code },
       AbortSignal.any([lifetime, AbortSignal.timeout(15000)]),
     )
     lifetime.throwIfAborted()

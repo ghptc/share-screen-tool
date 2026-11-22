@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Test the production images and edge on a Linux Docker bridge with a local ACME CA."""
+import base64
+import hashlib
+import hmac
+import http.client
+import json
+import os
+from pathlib import Path
+import secrets
+import socket
+import ssl
+import subprocess
+import sys
+import tempfile
+import time
+from urllib.parse import parse_qs, urlsplit
+
+ROOT = Path(__file__).resolve().parents[1]
+PEBBLE = "ghcr.io/letsencrypt/pebble@sha256:0c81f05db371f436c97fb894bd6d2ab8fc9c8e2ce40f8bef8a8e15941bcd75ef"
+
+def test(work, release):
+    prefix = "10.241." + str(secrets.randbelow(254) + 1)
+    ca, player = prefix + ".12", prefix + ".13"
+    env = dict(os.environ, WHITERUN_RELEASE=release, PUBLIC_IPV4=player, BIND_IPV4="127.0.0.1",
+               DISCORD_CHANNELS="11/22", DISCORD_CLIENT_ID="1234", DISCORD_DENIED_USERS="")
+    for k in ("DISCORD_BOT_TOKEN", "DISCORD_CLIENT_SECRET", "DISCORD_PRIVATE_VOICE_KEY", "DISCORD_PRIVATE_ROOM_KEY",
+              "DISCORD_PRIVATE_ADMISSION_KEY", "DISCORD_MEDIA_KEY", "DISCORD_MEDIA_SECRET"):
+        env[k] = secrets.token_hex(32)
+    root = work / "ca.crt"
+    key = work / "ca.key"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=ca",
+                    "-addext", "subjectAltName=DNS:ca,IP:" + ca, "-keyout", str(key), "-out", str(root)],
+                   capture_output=True, check=True)
+    # Only the disposable test authority receives this key.
+    key.chmod(0o644)
+    config = {"pebble": {"listenAddress":"0.0.0.0:14000", "managementListenAddress":"0.0.0.0:15000",
+              "certificate":"/test-ca.crt", "privateKey":"/test-ca.key", "httpPort":8080, "tlsPort":8443,
+              "profiles":{"shortlived":{"description":"IP certificate test","validityPeriod":576000}}}}
+    (work / "pebble.json").write_text(json.dumps(config))
+    prod = ROOT / "deploy/ec2"
+    original = (prod / "Caddyfile").read_text()
+    le = "https://acme-v02.api.letsencrypt.org/directory {"
+    assert original.count(le) == 1
+    (work / "Caddyfile").write_text(original.replace(le, "https://ca:14000/dir {\n            trusted_roots /test-ca.crt"))
+    override = work / "local.yaml"
+    override.write_text(f"""networks:
+  default:
+    internal: true
+    ipam:
+      config: [{{subnet: {prefix}.0/28}}]
+services:
+  livekit:
+    ports: !reset []
+  player:
+    ports: !reset []
+    networks:
+      default: {{ipv4_address: {player}}}
+    volumes:
+      - {work}/Caddyfile:/etc/caddy/Caddyfile:ro
+      - {root}:/test-ca.crt:ro
+  ca:
+    image: {PEBBLE}
+    command: ["-config", "/pebble.json"]
+    environment: {{PEBBLE_VA_NOSLEEP: "1"}}
+    networks:
+      default: {{ipv4_address: {ca}}}
+    volumes:
+      - {work}/pebble.json:/pebble.json:ro
+      - {root}:/test-ca.crt:ro
+      - {key}:/test-ca.key:ro
+""")
+    cmd = ["docker", "compose", "--env-file", "/dev/null", "-p", "whiterun-ec2-test-"+secrets.token_hex(4),
+           "-f", str(prod / "compose.yaml")]
+    def run(args, check=True):
+        result = subprocess.run(cmd + args, env=env, capture_output=True)
+        if check and result.returncode:
+            if args[0] == "up":
+                subprocess.run(cmd + ["ps", "-a", "--format", "{{.Service}} {{.State}} {{.Health}}"], env=env)
+            raise RuntimeError("Compose operation failed: " + args[0])
+        return result
+    model = json.loads(run(["config", "--format", "json"]).stdout)["services"]
+    assert set(model) == {"livekit","backend","discord-bot","player"}
+    assert all("build" not in service and service["pull_policy"] == "never" for service in model.values())
+    ports = {(name, p["host_ip"], p["published"], p["protocol"]) for name, s in model.items() for p in s.get("ports", [])}
+    assert ports == {(s,"127.0.0.1",p,t) for s,p,t in [("livekit","17891","tcp"),("livekit","17892","udp"),
+                                                        ("player","80","tcp"),("player","8443","tcp")]}
+    assert model["livekit"]["environment"]["NODE_IP"] == player
+    cmd.extend(["-f", str(override)])
+    def request(host, port, tls, method, path):
+        conn = http.client.HTTPSConnection(host, port, context=tls, timeout=3)
+        try:
+            conn.request(method, path, body="{}" if method == "POST" else None,
+                         headers={"Origin":"https://"+player+":8443", "Content-Type":"application/json"})
+            res = conn.getresponse()
+            return res.status, res.getheader("Location", ""), res.read()
+        finally:
+            conn.close()
+    try:
+        run(["up", "-d", "--wait", "--wait-timeout", "75", "ca", "livekit", "backend", "player"])
+        # Verify the IP SAN and chain using Pebble's freshly generated issuer root.
+        api_tls = ssl.create_default_context(cafile=str(root))
+        status, _, pem = request(ca, 15000, api_tls, "GET", "/roots/0")
+        assert status == 200
+        tls = ssl.create_default_context(cadata=pem.decode())
+        ref = base64.urlsafe_b64encode(hmac.digest(env["DISCORD_PRIVATE_ROOM_KEY"].encode(),
+                                       b"whiterun:discord:voice:v1/11/22", hashlib.sha256)[:24]).decode()
+        for _ in range(50):
+            try:
+                assert request(player, 8443, tls, "GET", "/r/"+ref)[0] == 200
+                break
+            except OSError:
+                time.sleep(1)
+        else:
+            raise RuntimeError("local HTTP-01 issuance or IP SAN verification failed")
+        def leaf_certificate():
+            with socket.create_connection((player, 8443), timeout=3) as client:
+                with tls.wrap_socket(client, server_hostname=player) as secure:
+                    return secure.getpeercert(binary_form=True)
+        leaf = leaf_certificate()
+        run(["up", "-d", "--no-deps", "--force-recreate", "player"])
+        for _ in range(25):
+            try:
+                assert leaf_certificate() == leaf
+                break
+            except OSError:
+                time.sleep(0.2)
+        else:
+            raise RuntimeError("recreated edge did not restore the verified certificate")
+        for path in ("/", "/player/join", "/api/internal/discord/admit", "/twirp", "/api/fixture/authorize"):
+            assert request(player, 8443, tls, "GET", path)[0] == 404
+        assert request(player, 8443, tls, "POST", "/api/discord/"+ref+"/join")[0] == 401
+        status, loc, _ = request(player, 8443, tls, "GET", "/api/discord/auth/"+ref)
+        assert status == 303 and urlsplit(loc).hostname == "discord.com"
+        assert parse_qs(urlsplit(loc).query)["redirect_uri"] == ["https://" + player + ":8443/api/discord/callback"]
+        health = ["exec", "-T", "backend", "/server", "healthcheck"]
+        ready = health + ["http://127.0.0.1:8080/readyz"]
+        run(ready)
+        env["DISCORD_PRIVATE_ADMISSION_KEY"] = secrets.token_hex(32)
+        run(["up", "-d", "--no-deps", "--force-recreate", "backend"])
+        for _ in range(25):
+            if run(health + ["http://127.0.0.1:8080/healthz"], False).returncode == 0:
+                break
+            time.sleep(0.2)
+        else:
+            raise RuntimeError("backend did not recover liveness")
+        assert run(ready, False).returncode
+        print("PASS: ports, HTTP-01, IP TLS across edge replacement, OAuth callback, copied-link denial and SFU admission")
+    finally:
+        run(["down", "--volumes"])
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        sys.exit("Usage: scripts/test-ec2 LOCAL_IMAGE_TAG")
+    with tempfile.TemporaryDirectory() as temp:
+        test(Path(temp), sys.argv[1])

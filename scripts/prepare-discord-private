@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Prepare role-specific keys and verify the Discord app, without displaying credentials."""
+import base64
+import fcntl
+import http.client
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import stat
+import subprocess
+import sys
+from urllib.parse import urlencode
+
+ROOT = Path(__file__).resolve().parents[1]
+PRIVATE = ("DISCORD_PRIVATE_ROOM_KEY", "DISCORD_PRIVATE_ADMISSION_KEY", "DISCORD_PRIVATE_VOICE_KEY",
+           "DISCORD_MEDIA_KEY", "DISCORD_MEDIA_SECRET")
+PROVIDER = ("DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET", "DISCORD_PUBLIC_KEY", "DISCORD_BOT_TOKEN",
+            "DISCORD_CHANNELS")
+OPTIONAL = ("DISCORD_PRIVATE_HOST", "DISCORD_PRIVATE_IP", "PUBLIC_IPV4", "BIND_IPV4", "DISCORD_FIXTURE_CLIENT_SECRET",
+            "DISCORD_ROOM_KEY", "DISCORD_VOICE_KEY", "DISCORD_ADMISSION_KEY", "DISCORD_FIXTURE_KEY",
+            "LOCAL_ADMIN_KEY", "LOCAL_PLAYER_KEY")
+SNOWFLAKE = re.compile(r"[1-9][0-9]{16,19}")
+
+def compose_env():
+    names = set(PRIVATE + PROVIDER + OPTIONAL + ("DISCORD_DENIED_USERS",))
+    return {k: v for k, v in os.environ.items() if k not in names}
+
+def configuration(path=None):
+    path = path or ROOT / ".env"
+    with os.fdopen(os.open(path, os.O_RDWR | os.O_NOFOLLOW), "r+") as f:
+        info = os.fstat(f.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            sys.exit("Protect .env with mode 0600 and run as its owner")
+        fcntl.flock(f, fcntl.LOCK_EX)
+        content = f.read()
+        missing = [key for key in PRIVATE if not re.search(r"^\s*(?:export\s+)?" + key + r"\s*=", content, re.M)]
+        if missing:
+            f.write(("" if content.endswith("\n") else "\n") + "".join(key + "=" + secrets.token_hex(32) + "\n" for key in missing))
+            f.flush()
+    # Use Compose's own dotenv semantics. Capture the rendered values in memory.
+    # Explicitly select this file even when the calling shell has overrides.
+    names = PRIVATE + PROVIDER + OPTIONAL
+    model = {"services": {"check": {"image": "unused", "environment": {k: "${" + k + ":-}" for k in names}}}}
+    result = subprocess.run(["docker", "compose", "--env-file", str(path), "-p", "whiterun-config-check", "-f", "-",
+                             "config", "--format", "json"], input=json.dumps(model), text=True, cwd=path.parent,
+                            env=compose_env(), capture_output=True)
+    if result.returncode:
+        sys.exit("Cannot parse protected configuration")
+    return json.loads(result.stdout)["services"]["check"]["environment"]
+
+def api(method, path, authorization, form=None):
+    conn = http.client.HTTPSConnection("discord.com", timeout=10)
+    headers = {"Authorization": authorization, "User-Agent": "WhiterunLive (private guild setup)"}
+    if form is not None:
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    try:
+        conn.request(method, "/api/v10" + path, None if form is None else urlencode(form), headers)
+        response = conn.getresponse()
+        data = response.read(1_000_000)
+        if response.status == 200 and data:
+            return response.status, json.loads(data)
+        return response.status, None
+    finally:
+        conn.close()
+
+def used_by_fixture(secret):
+    # Older workstation versions supplied the mock provider with DISCORD_CLIENT_SECRET.
+    ids = subprocess.run(["docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=whiterun-live",
+                          "--filter", "label=com.docker.compose.service=discord-fixture"], capture_output=True, check=True)
+    for container in ids.stdout.decode().split():
+        data = subprocess.run(["docker", "inspect", "-f", "{{json .Config.Env}}", container], capture_output=True, check=True)
+        if "DISCORD_CLIENT_SECRET=" + secret in json.loads(data.stdout):
+            return True
+    return False
+
+def ec2_addresses(public, bind):
+    try:
+        pub, eni = ipaddress.IPv4Address(public), ipaddress.IPv4Address(bind)
+    except ValueError:
+        return False
+    if not pub.is_global or pub.is_multicast or pub == eni or eni.is_loopback or eni.is_unspecified:
+        return False
+    interfaces = subprocess.run(["ip", "-j", "-4", "addr", "show"], capture_output=True, check=True)
+    return any(a.get("local") == bind and a.get("scope") == "global"
+               for i in json.loads(interfaces.stdout) for a in i.get("addr_info", []))
+
+def verify(ec2_file=None):
+    conf = configuration(ec2_file)
+    checks = []
+    def check(label, ok):
+        print(label, "OK" if ok else "PENDING")
+        checks.append(bool(ok))
+        return ok
+
+    missing = [key for key in PRIVATE + PROVIDER if not conf[key]]
+    if missing:
+        print("Missing configuration")
+        print("\n".join(missing))
+    credentials = PRIVATE + ("DISCORD_CLIENT_SECRET", "DISCORD_BOT_TOKEN")
+    if not check("Independent private credentials", all(len(conf[k]) >= 32 for k in PRIVATE)
+          and all(conf[k] and conf[k] == conf[k].strip() for k in credentials)
+          and len({conf[k] for k in credentials}) == len(credentials)
+          and not ({conf[k] for k in credentials} & {conf[k] for k in OPTIONAL if conf[k]})):
+        return False
+    app_id = conf["DISCORD_CLIENT_ID"]
+    bot = conf["DISCORD_BOT_TOKEN"]
+    if not check("Bot credential and application metadata format",
+                 SNOWFLAKE.fullmatch(app_id) and re.fullmatch(r"[a-fA-F0-9]{64}", conf["DISCORD_PUBLIC_KEY"])
+                 and re.fullmatch(r"[\w-]+\.[\w-]+\.[\w-]+", bot, flags=re.ASCII)):
+        return False
+    auth = "Bot " + bot
+    status, app = api("GET", "/applications/@me", auth)
+    if not check("Discord bot authentication and application identity", status == 200 and app["id"] == app_id
+                 and app.get("verify_key") == conf["DISCORD_PUBLIC_KEY"].lower()):
+        return False
+    check("Gateway interaction delivery", not app.get("interactions_endpoint_url"))
+    host = conf["PUBLIC_IPV4"] if ec2_file else (conf["DISCORD_PRIVATE_HOST"] or "localhost")
+    bind = conf["BIND_IPV4"] if ec2_file else conf["DISCORD_PRIVATE_IP"]
+    labels = host.split(".")
+    hostname_ok = (len(host) <= 253 and all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels))
+    bind_ok = not bind and host == "localhost"
+    if bind:
+        try:
+            addr = ipaddress.IPv4Address(bind)
+            bind_ok = not addr.is_unspecified and not addr.is_multicast and addr.is_loopback == (host == "localhost")
+        except ValueError:
+            pass
+    if ec2_file:
+        bind_ok = ec2_addresses(host, bind)
+    check("Private HTTPS host and media binding", hostname_ok and bind_ok)
+    check("Exact OAuth callback registered", "https://" + host + ":8443/api/discord/callback" in (app.get("redirect_uris") or []))
+    install = (app.get("integration_types_config") or {}).get("0", {}).get("oauth2_install_params") or app.get("install_params") or {}
+    print("Guild Install default scopes", "configured" if {"bot", "applications.commands"} <= set(install.get("scopes", [])) else "review in Portal")
+    status, guilds = api("GET", "/users/@me/guilds?limit=1", auth)
+    check("Bot installed in a guild", status == 200 and guilds)
+    pairs = [p.strip().split("/") for p in conf["DISCORD_CHANNELS"].split(",")]
+    if check("Guild and voice channel ID format", all(len(pair) == 2 and all(SNOWFLAKE.fullmatch(v) for v in pair) for pair in pairs)):
+        valid = True
+        for guild, voice in pairs:
+            status, channel = api("GET", "/channels/" + voice, auth)
+            valid &= status == 200 and channel.get("type") == 2 and channel.get("guild_id") == guild
+        check("Every configured voice channel accessible in its declared guild", valid)
+        registered = True
+        for guild in {p[0] for p in pairs}:
+            status, commands = api("GET", "/applications/" + app_id + "/guilds/" + guild + "/commands", auth)
+            registered &= status == 200 and any(c.get("name") == "live" and c.get("type") == 1 for c in commands)
+        print("Guild /live registration", "verified" if registered else "pending bot startup or guild permissions")
+
+    secret = conf["DISCORD_CLIENT_SECRET"]
+    if check("OAuth secret independent of the development provider", secret and secret != conf["DISCORD_FIXTURE_CLIENT_SECRET"]
+             and not used_by_fixture(secret)):
+        basic = "Basic " + base64.b64encode((app_id + ":" + secret).encode()).decode()
+        status, grant = api("POST", "/oauth2/token", basic, {"grant_type": "client_credentials", "scope": "identify"})
+        if check("Discord OAuth client authentication", status == 200 and grant.get("access_token")):
+            status, _ = api("POST", "/oauth2/token/revoke", basic, {"token": grant["access_token"], "token_type_hint": "access_token"})
+            check("One-time OAuth check credential revoked", status in (200, 204))
+    return not missing and all(checks)
+
+if __name__ == "__main__":
+    try:
+        ec2 = len(sys.argv) == 3 and sys.argv[1] == "--check-ec2"
+        if not ec2 and sys.argv[1:] not in ([], ["--start"]):
+            sys.exit("Usage: prepare-discord-private [--start | --check-ec2 /path/to/production.env]")
+        if not verify(Path(sys.argv[2]).absolute() if ec2 else None):
+            sys.exit(1)
+        if sys.argv[1:] == ["--start"]:
+            print("Starting the verified private guild profile", flush=True)
+            subprocess.run(["docker", "compose", "-p", "whiterun-discord-private", "--env-file", ".env",
+                            "-f", "compose.discord-private.yaml", "up", "-d", "--build", "--wait"],
+                           cwd=ROOT, env=compose_env(), capture_output=True, check=True)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, http.client.HTTPException, subprocess.SubprocessError) as err:
+        sys.exit("Private setup check unavailable (" + type(err).__name__ + ")")

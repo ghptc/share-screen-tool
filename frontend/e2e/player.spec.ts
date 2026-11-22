@@ -121,6 +121,13 @@ test('three local players share, focus, reconnect, refresh and release the scree
       .last()
       .click()
     await expect(tiles(alice)).toHaveCount(1)
+    const switcher = alice.getByRole('combobox', {name:'Focused screen'})
+    const beforeFocus = await tiles(alice).getAttribute('data-track-sid')
+    await alice.getByRole('button',{name:'Toggle fullscreen'}).click()
+    await switcher.selectOption({index:1})
+    await expect(tiles(alice)).not.toHaveAttribute('data-track-sid',beforeFocus!)
+    await expect.poll(()=>alice.evaluate(()=>Boolean(document.fullscreenElement))).toBe(true)
+    await alice.evaluate(()=>document.exitFullscreen())
     await alice.getByRole('button', { name: 'Back to grid' }).click()
     await expect(tiles(alice)).toHaveCount(3)
     await alice.getByRole('button', { name: 'Toggle fullscreen' }).click()
@@ -175,5 +182,65 @@ test('initial gateway interruption retries local entry without prompting for cap
     expect(await page.evaluate(() => window.__screenTest.calls)).toBe(0)
   } finally {
     await context.close()
+  }
+})
+
+test('four simultaneous screen slots admit viewers and recover after departure', async ({ browser, baseURL }) => {
+  test.setTimeout(160000)
+  const contexts = await Promise.all(Array.from({ length: 6 }, () => browser.newContext()))
+  async function enter(index: number) {
+    await generatedCapture(contexts[index])
+    const page = await contexts[index].newPage()
+    await page.goto(baseURL!)
+    await connected(page)
+    await page.getByRole('checkbox', { name: 'Share audio' }).uncheck()
+    return page
+  }
+  try {
+    const pages = await Promise.all([0,1,2,3,4].map(enter))
+    for (const p of pages.slice(0,3)) {
+      await start(p)
+      await expect(p.getByRole('button', { name: 'Stop sharing' })).toBeVisible()
+    }
+    await Promise.all(pages.slice(3).map(p => expect(tiles(p)).toHaveCount(3)))
+    // Both participants must enter the real SFU publication path before a
+    // fourth screen can become visible and trigger the player's UX precheck.
+    let approvals = 0
+    let ready!: () => void
+    const barrier = new Promise<void>(resolve => { ready = resolve })
+    for (const p of pages.slice(3)) {
+      await p.exposeFunction('releasePicker', async () => {
+        if (++approvals === 2) ready()
+        await barrier
+      })
+      await p.evaluate(() => {
+        const capture = navigator.mediaDevices.getDisplayMedia.bind(navigator.mediaDevices)
+        navigator.mediaDevices.getDisplayMedia = async options => {
+          await (window as unknown as { releasePicker(): Promise<void> }).releasePicker()
+          return capture(options)
+        }
+      })
+    }
+    await Promise.all(pages.slice(3).map(start))
+    await expect(tiles(pages[0])).toHaveCount(4)
+    const viewer = await enter(5)
+    await expect(tiles(viewer)).toHaveCount(4)
+    await viewer.bringToFront()
+    await expect.poll(() => viewer.locator('video').evaluateAll(v => v.filter(e => e.videoWidth > 0 && e.readyState >= 2).length)).toBe(4)
+    const boxes = await Promise.all((await tiles(viewer).all()).map(el => el.boundingBox()))
+    expect(new Set(boxes.map(b => b!.x)).size).toBe(2)
+    expect(new Set(boxes.map(b => b!.y)).size).toBe(2)
+    const loser = (await pages[3].getByRole('button', { name: 'Stop sharing' }).isVisible()) ? pages[4] : pages[3]
+    await expect(loser.getByRole('alert')).toContainText('All four screens', {timeout: 20000})
+    expect(await loser.evaluate(() => window.__screenTest.streams.every(s => s.getTracks().every(t => t.readyState === 'ended')))).toBe(true)
+    await contexts[0].close()
+    await expect(tiles(loser)).toHaveCount(3, {timeout: 95000})
+    await start(loser)
+    await expect(tiles(viewer)).toHaveCount(4)
+    expect(await viewer.evaluate(() => window.__screenTest.calls)).toBe(0)
+    for (const p of pages.slice(1)) await p.getByRole('button', { name: 'Stop sharing' }).click()
+    await expect(tiles(viewer)).toHaveCount(0)
+  } finally {
+    await Promise.all(contexts.map(c => c.close()))
   }
 })

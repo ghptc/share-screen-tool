@@ -1,6 +1,6 @@
 import { test, expect, type BrowserContext, type Page, type WebSocketRoute } from '@playwright/test'
-import { execFileSync, spawn } from 'node:child_process'
-import { fixtureAudio } from './fixture-audio'
+import { execFileSync } from 'node:child_process'
+import { fixtureAudio, testGame } from './fixture-audio'
 import { generatedCapture } from './generated-capture'
 
 const sink = process.env.PLAYER_AUDIO_TEST_SINK
@@ -20,54 +20,6 @@ function taps(serials: number[]) {
     .filter((serial) => serials.includes(serial))
 }
 
-function game(name: string, frequency: number) {
-  const child = spawn(
-    'pw-cat',
-    [
-      '--playback',
-      '--raw',
-      '--target',
-      sink!,
-      '--rate',
-      '48000',
-      '--channels',
-      '2',
-      '--format',
-      's16',
-      '--properties',
-      'node.name=' + name,
-      '-',
-    ],
-    { stdio: ['pipe', 'ignore', 'pipe'] },
-  )
-  const closed = new Promise<void>((resolve, reject) => {
-    child.once('close', () => resolve())
-    child.once('error', reject)
-  })
-  const block = Buffer.alloc(960 * 4)
-  for (let i = 0; i < 960; i++) {
-    const sample = Math.round(300 * Math.sin((2 * Math.PI * frequency * i) / 48000))
-    block.writeInt16LE(sample, i * 4)
-    block.writeInt16LE(sample, i * 4 + 2)
-  }
-  const fill = () => {
-    while (!child.stdin.destroyed && child.stdin.write(block)) {
-      /* pw-cat clocks the stream */
-    }
-  }
-  child.stdin.on('drain', fill)
-  child.stdin.on('error', () => {})
-  fill()
-  return {
-    name,
-    stop: async () => {
-      child.stdin.destroy()
-      child.kill('SIGTERM')
-      await closed
-    },
-  }
-}
-
 test('automatic native audio follows screen consent, live source identity, reconnection and teardown', async ({
   browser,
   baseURL,
@@ -76,7 +28,7 @@ test('automatic native audio follows screen consent, live source identity, recon
   test.setTimeout(120000)
   const prefix = 'player-game-' + process.pid + '-'
   const contexts: BrowserContext[] = []
-  const games: ReturnType<typeof game>[] = []
+  const games: ReturnType<typeof testGame>[] = []
   const ids: number[] = []
   const sockets: { client: WebSocketRoute; server: WebSocketRoute }[] = []
   async function participant() {
@@ -90,7 +42,7 @@ test('automatic native audio follows screen consent, live source identity, recon
     return page
   }
   async function playGame(label: string, hz: number) {
-    const fixture = game(prefix + label, hz)
+    const fixture = testGame(prefix + label, hz, sink!)
     games.push(fixture)
     const serial = () =>
       Number(
@@ -121,6 +73,9 @@ test('automatic native audio follows screen consent, live source identity, recon
     await expect(listener.locator('audio')).toHaveCount(0)
 
     const a = await playGame('one', 500)
+    await expect(dock(owner)).toHaveText('Choose audio source')
+    await onlyTap()
+    await owner.getByRole('button', { name: /Allow audio · .*one/ }).click()
     await expect(dock(owner)).toHaveText('Sharing audio')
     await onlyTap(a.id)
     await expect(listener.locator('audio')).toHaveCount(1)
@@ -128,6 +83,45 @@ test('automatic native audio follows screen consent, live source identity, recon
       await listener.getByRole('button', { name: 'Enable audio' }).click()
     const b = await playGame('two', 1000)
     await openMenu(owner)
+    await owner.getByRole('button', { name: /Allow audio · .*two/ }).click()
+    await expect.poll(() => taps(ids).sort((l, r) => l - r)).toEqual([a.id, b.id].sort((l, r) => l - r))
+    await expect(listener.locator('audio')).toHaveCount(1)
+    // Sample the received LiveKit track before output gain; do not connect a
+    // second renderer to the physical headset.
+    await listener.bringToFront()
+    await listener.getByRole('button', { name: 'Audio', exact: true }).click()
+    const spectrum = await listener.evaluate(async () => {
+      const element = document.querySelector('audio')!
+      const ctx = new AudioContext()
+      try {
+        await ctx.resume()
+        const input = ctx.createMediaStreamSource(element.srcObject as MediaStream)
+        const meter = ctx.createAnalyser()
+        meter.fftSize = 8192
+        meter.smoothingTimeConstant = 0
+        input.connect(meter)
+        const data = new Float32Array(meter.frequencyBinCount)
+        let levels = [-Infinity, -Infinity]
+        for (let attempt = 0; attempt < 25; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 120))
+          meter.getFloatFrequencyData(data)
+          levels = [500, 1000].map((hz) => {
+            const bin = Math.round((hz * meter.fftSize) / ctx.sampleRate)
+            return Math.max(...data.slice(bin - 2, bin + 3))
+          })
+          if (levels.every((db) => db > -65)) break
+        }
+        return levels
+      } finally {
+        await ctx.close()
+      }
+    })
+    expect(spectrum.every((db) => db > -65)).toBe(true)
+    console.log(
+      'Received two-source mix, 500 Hz and 1000 Hz dBFS',
+      spectrum.map((db) => db.toFixed(1)),
+    )
+    await owner.getByRole('button', { name: /Revoke .*one/ }).click()
     await choose(owner, b.name)
     await onlyTap(b.id)
     await expect(dock(owner)).toHaveText('Sharing audio')

@@ -468,3 +468,54 @@ test('local native preview suppression uses participant identity, not names or a
  expect(document.querySelectorAll('audio')).toHaveLength(0)
  expect(screen.getByText(/Preview is silent only in this publisher session/)).toBeInTheDocument()
 })
+
+test('an unsupported sender limit leaves the approved screen live', async () => {
+  const publish = room.localParticipant.publishTrack.getMockImplementation()!
+  room.localParticipant.publishTrack.mockImplementationOnce((track, options) => {
+    Object.assign(track, { sender: { getParameters: () => ({ encodings: [] }) } })
+    return publish(track, options)
+  })
+  render(<ScreenSharing room={room as unknown as Room} canPublish player />)
+  fireEvent.click(screen.getByRole('button', { name: 'Quality' }))
+  fireEvent.change(screen.getByLabelText('Publish FPS'), { target: { value: '30' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Start sharing' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('screen is live')
+  expect(screen.getByRole('button', { name: 'Stop sharing' })).toBeEnabled()
+  expect(raw.stop).not.toHaveBeenCalled()
+})
+
+test('Discord publication waits for the local LiveKit permission event after the HTTP upgrade', async () => {
+  const permission = { canPublish: false }
+  Object.assign(room.localParticipant, { permissions: permission })
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ publishing: true })))
+  render(<ScreenSharing room={room as unknown as Room} channel="channel" canPublish />)
+  fireEvent.click(screen.getByRole('button', { name: 'Start sharing' }))
+  await waitFor(() => expect(room.listeners.get(RoomEvent.ParticipantPermissionsChanged)?.size).toBe(1))
+  expect(room.localParticipant.publishTrack).not.toHaveBeenCalled()
+  permission.canPublish = true
+  act(() => room.emit(RoomEvent.ParticipantPermissionsChanged))
+  await waitFor(() => expect(room.localParticipant.publishTrack).toHaveBeenCalledTimes(1))
+  expect(capture).toHaveBeenCalledTimes(1)
+  expect(room.listeners.get(RoomEvent.ParticipantPermissionsChanged)?.size).toBe(0)
+})
+
+test('hosted player pairs through its own HTTPS API only after an active share and click', async () => {
+  vi.stubEnv('VITE_NATIVE_AUDIO_MODE', 'pair')
+  const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async path =>
+    String(path).endsWith('/watch')
+      ? new Response(new ReadableStream({start(c) { c.enqueue(new Uint8Array([1])) }}))
+      : Response.json({session: 'test-session', code: 'test-code'}))
+  try {
+    render(<ScreenSharing room={room as unknown as Room} canPublish player nativeAudioControl="control" />)
+    fireEvent.click(screen.getByRole('button', {name: 'Audio'}))
+    expect(screen.queryByRole('button', {name: 'Pair native audio helper'})).toBeNull()
+    await start()
+    expect(fetcher).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', {name: 'Pair native audio helper'}))
+    expect(await screen.findByLabelText('One-time native audio pairing JSON')).toHaveAttribute('type', 'password')
+    fireEvent.click(screen.getByRole('button', {name: 'Stop sharing'}))
+    await waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/native-audio/test-session/stop', expect.anything()))
+  } finally {
+    vi.unstubAllEnvs()
+  }
+})

@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -111,6 +112,7 @@ func run() (runErr error) {
 	version := flag.Bool("version", false, "Print running executable identity without capture or pairing")
 	timingPath := flag.String("timing-json", "", "Optional new metadata-only JSONL timing log (never audio); explicit capture consent still required")
 	instance := flag.String("pipewire-instance", "", "Expected PipeWire core instance for a desktop selection")
+	additional := flag.String("additional-applications", "", "Additional explicitly authorized application serials on the selected core")
 	application := flag.Uint64("application", 0, "Explicit local application object.serial from --list-applications; preserves its normal headset playback")
 	listApps := flag.Bool("list-applications", false, "List eligible stereo application streams; browser mixes are excluded")
 	mixedMonitor := flag.Bool("allow-mixed-monitor", false, "Diagnostic-only consent: whole-monitor capture can retransmit remote playback")
@@ -169,7 +171,8 @@ func run() (runErr error) {
 		if err != nil {
 			return err
 		}
-		if *instance != "" && coreInstance(graph) != *instance {
+		core := coreInstance(graph)
+		if core == "" || (*instance != "" && core != *instance) {
 			return errors.New("selected PipeWire instance ended")
 		}
 		selected, err := selectApplication(graph, *application)
@@ -180,7 +183,8 @@ func run() (runErr error) {
 			return err
 		}
 		name := fmt.Sprintf("whiterun-capture-%x", rand.Text())
-		tap = &applicationTap{core: *instance, sourceSerial: *application, sourceID: selected.ID, captureName: name}
+		// A manual pairing can wait at stdin while PipeWire restarts and reuses a serial.
+		tap = &applicationTap{core: core, sourceSerial: *application, sourceID: selected.ID, captureName: name}
 		serial = strconv.FormatUint(*application, 10)
 	} else {
 		if !*mixedMonitor {
@@ -189,6 +193,33 @@ func run() (runErr error) {
 		serial, err = target(nodes, *sink)
 		if err != nil {
 			return err
+		}
+	}
+	var extraTaps []*applicationTap
+	if *additional != "" {
+		ids := strings.Split(*additional, ",")
+		if tap == nil || *instance == "" || len(ids) > 7 {
+			return errors.New("invalid additional application selection")
+		}
+		graph, err := readGraph(context.Background())
+		if err != nil || coreInstance(graph) != *instance {
+			return errors.New("selected PipeWire instance ended")
+		}
+		seen := map[uint64]bool{*application: true}
+		for _, id := range ids {
+			n, err := strconv.ParseUint(id, 10, 64)
+			if err != nil || n == 0 || seen[n] {
+				return errors.New("invalid additional application")
+			}
+			seen[n] = true
+			node, err := selectApplication(graph, n)
+			if err != nil {
+				return err
+			}
+			if _, err = stereoPorts(graph, node.ID, "output"); err != nil {
+				return err
+			}
+			extraTaps = append(extraTaps, &applicationTap{core: *instance, sourceSerial: n, sourceID: node.ID, captureName: fmt.Sprintf("whiterun-capture-%x", rand.Text())})
 		}
 	}
 	if _, err := exec.LookPath("pw-cat"); err != nil {
@@ -298,6 +329,38 @@ func run() (runErr error) {
 		return err
 	}
 	defer func() { _ = capture.Process.Kill(); _ = capture.Wait() }()
+	if len(extraTaps) > 0 {
+		inputs := []io.Reader{pcm}
+		for _, extra := range extraTaps {
+			args := append([]string(nil), capture.Args[1:]...)
+			for i := range args {
+				if i > 0 && args[i-1] == "--target" {
+					args[i] = strconv.FormatUint(extra.sourceSerial, 10)
+				}
+				if i > 0 && args[i-1] == "--properties" {
+					args[i] = strings.ReplaceAll(properties, tap.captureName, extra.captureName)
+				}
+			}
+			cmd := exec.CommandContext(ctx, "pw-cat", args...)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+			reader, err := cmd.StdoutPipe()
+			if err != nil {
+				return err
+			}
+			cmd.Stderr = os.Stderr
+			if err = cmd.Start(); err != nil {
+				return err
+			}
+			defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+			inputs = append(inputs, reader)
+		}
+		for _, t := range extraTaps {
+			if err := t.waitForLinks(ctx); err != nil {
+				return err
+			}
+		}
+		input.Reader = &stereoMix{inputs: inputs}
+	}
 	if tap != nil {
 		if err := tap.waitForLinks(ctx); err != nil {
 			return err
@@ -355,6 +418,11 @@ func run() (runErr error) {
 				return err
 			}
 			if tap != nil {
+				for _, t := range extraTaps {
+					if err := t.verify(ctx); err != nil {
+						return err
+					}
+				}
 				if err := tap.verify(ctx); err != nil {
 					return err
 				}

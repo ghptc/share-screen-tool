@@ -33,7 +33,7 @@ func Load() (Config, error) {
 	c.AdminKey = os.Getenv("LOCAL_ADMIN_KEY")
 	c.WSURL = value("LIVEKIT_WS_URL", "ws://127.0.0.1:7880")
 	c.AppOrigin = value("APP_ORIGIN", "http://localhost:5173")
-	if len(c.AdminKey) < 32 || strings.TrimSpace(c.AdminKey) != c.AdminKey {
+	if os.Getenv("DISCORD_MODE") != "discord" && (len(c.AdminKey) < 32 || strings.TrimSpace(c.AdminKey) != c.AdminKey) {
 		return Config{}, fmt.Errorf("LOCAL_ADMIN_KEY must contain at least 32 characters with no surrounding whitespace")
 	}
 	for _, v := range []struct {
@@ -45,6 +45,9 @@ func Load() (Config, error) {
 		if !schemeOK || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 			return Config{}, fmt.Errorf("%s must be a valid origin", v.name)
 		}
+	}
+	if os.Getenv("DISCORD_MODE") == "discord" && !strings.HasPrefix(c.WSURL, "wss://") {
+		return Config{}, fmt.Errorf("Discord native media requires a TLS-protected LIVEKIT_WS_URL")
 	}
 	c.LocalPlayerKey = os.Getenv("LOCAL_PLAYER_KEY")
 	if c.LocalPlayerKey != "" {

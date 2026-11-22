@@ -85,8 +85,9 @@ func serveDesktop(origin string) error {
 	codePattern := regexp.MustCompile("^[A-Za-z0-9_-]{43}$")
 	mux.HandleFunc("POST /start", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Source string
-			Code   string
+			Source     string
+			Additional []string
+			Code       string
 		}
 		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
 		dec.DisallowUnknownFields()
@@ -109,13 +110,29 @@ func serveDesktop(origin string) error {
 			http.Error(w, "Select an application", 400)
 			return
 		}
+		if len(req.Additional) > 7 {
+			http.Error(w, "Too many audio sources", 400)
+			return
+		}
+		seen := map[uint64]bool{serial: true}
+		var extra []string
+		for _, v := range req.Additional {
+			c, id, ok := strings.Cut(v, ":")
+			n, err := strconv.ParseUint(id, 10, 64)
+			if !ok || !scoped || c != core || err != nil || n == 0 || seen[n] {
+				http.Error(w, "Invalid audio source set", 400)
+				return
+			}
+			seen[n] = true
+			extra = append(extra, strconv.FormatUint(n, 10))
+		}
 		select {
 		case slots <- struct{}{}:
 		default:
 			http.Error(w, "Audio launcher busy", 429)
 			return
 		}
-		child := exec.Command(binary, "--local-player-capture", "--start", "--pipewire-instance", core, "--application", strconv.FormatUint(serial, 10))
+		child := exec.Command(binary, "--local-player-capture", "--start", "--pipewire-instance", core, "--application", strconv.FormatUint(serial, 10), "--additional-applications", strings.Join(extra, ","))
 		child.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 		pair, _ := json.Marshal(map[string]string{"apiUrl": origin + "/api", "code": req.Code})
 		child.Stdin = bytes.NewReader(pair)

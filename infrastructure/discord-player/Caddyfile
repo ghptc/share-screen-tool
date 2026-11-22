@@ -1,0 +1,14 @@
+{
+	admin off
+	auto_https disable_redirects
+	skip_install_trust
+	# Proxy error records can include the OAuth callback query.
+	log {
+		output discard
+	}
+}
+
+https://{$PLAYER_HOST}:8443 {
+	tls internal
+	import /etc/caddy/player-routes.caddy
+}

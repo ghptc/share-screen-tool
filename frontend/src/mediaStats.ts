@@ -2,6 +2,7 @@
 export type MediaStat = RTCStats & {
   kind?: string; mediaType?: string; codecId?: string; mimeType?: string; active?: boolean
   bytesSent?: number; bytesReceived?: number; packetsSent?: number; packetsReceived?: number; packetsLost?: number
+  frames?: number; framesDropped?: number; encoderImplementation?: string; qualityLimitationReason?: string; mediaSourceId?: string
   framesEncoded?: number; framesDecoded?: number; frameWidth?: number; frameHeight?: number
   localId?: string; remoteId?: string; fractionLost?: number; roundTripTime?: number
   selectedCandidatePairId?: string; currentRoundTripTime?: number; state?: string; dtlsState?: string
@@ -10,6 +11,7 @@ export type StatsSample = Map<string, MediaStat>
 export type MediaMetrics = {
   direction: 'outbound' | 'inbound'; width?: number; height?: number; fps?: number; bitrateBps?: number
   codec?: string; packetsLost?: number; lossPercent?: number; rttMs?: number; iceState?: string; dtlsState?: string
+  captureFps?: number; dropped?: number; encoder?: string; limitation?: string
   layers: number
 }
 export function sampleReport(report: RTCStatsReport): StatsSample {
@@ -63,7 +65,8 @@ export function measureMedia(current: StatsSample, previous: StatsSample | undef
   const transport = [...current.values()].find(row => row.type === 'transport' && row.selectedCandidatePairId)
   const pair = current.get(transport?.selectedCandidatePairId || '')
   const rtt = remote?.roundTripTime ?? pair?.currentRoundTripTime
-  return { direction, width: best?.frameWidth, height: best?.frameHeight,
+  const source = current.get(best?.mediaSourceId || '')
+  return { direction, captureFps: source ? perSecond(source, previous, 'frames') : undefined, dropped: best?.framesDropped, encoder: best?.encoderImplementation, limitation: best?.qualityLimitationReason, width: best?.frameWidth, height: best?.frameHeight,
     fps: best ? perSecond(best, previous, frames) : undefined, bitrateBps,
     codec: current.get(best?.codecId || '')?.mimeType, packetsLost, lossPercent,
     rttMs: finite(rtt) && rtt >= 0 ? rtt * 1000 : undefined,

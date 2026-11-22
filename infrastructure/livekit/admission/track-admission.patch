@@ -1,0 +1,121 @@
+diff --git a/pkg/rtc/participant.go b/pkg/rtc/participant.go
+index 63376ed..a9ccd7e 100644
+--- a/pkg/rtc/participant.go
++++ b/pkg/rtc/participant.go
+@@ -174,0 +175 @@ type ParticipantParams struct {
++	ScreenSlots             *ScreenSlots
+@@ -1405 +1406,3 @@ func (p *ParticipantImpl) AddTrack(req *livekit.AddTrackRequest) {
+-	if !p.CanPublishSource(req.Source) {
++	if !p.CanPublishSource(req.Source) ||
++		(req.Source == livekit.TrackSource_SCREEN_SHARE_AUDIO && req.Type != livekit.TrackType_AUDIO) ||
++		(req.Source == livekit.TrackSource_SCREEN_SHARE && req.Type != livekit.TrackType_VIDEO) {
+@@ -1449,0 +1453,4 @@ func (p *ParticipantImpl) SetMigrateInfo(
++		if slots := p.params.ScreenSlots; slots != nil && ti.Type == livekit.TrackType_VIDEO &&
++			!slots.reserve(p.ID(), ti.Sid, now) {
++			continue
++		}
+@@ -1612,0 +1620,3 @@ func (p *ParticipantImpl) Close(sendLeave bool, reason types.ParticipantCloseRea
++	if slots := p.params.ScreenSlots; slots != nil {
++		slots.release(p.ID(), "")
++	}
+@@ -3019,0 +3030,3 @@ func (p *ParticipantImpl) releasePendingTrackLocked(trackID livekit.TrackID) {
++	if p.params.ScreenSlots != nil && released.Type == livekit.TrackType_VIDEO {
++		p.params.ScreenSlots.release(p.ID(), released.Sid)
++	}
+@@ -3174,0 +3188,15 @@ func (p *ParticipantImpl) addPendingTrack(req *livekit.AddTrackRequest) *livekit
++	if slots := p.params.ScreenSlots; slots != nil && ti.Type == livekit.TrackType_VIDEO {
++		// Repeated requests for an existing CID can reuse its SID upstream.
++		// A new screen must have its own reservation. Codec updates with an
++		// existing SID were handled above and need no additional slot.
++		if p.IsClosed() || p.pendingTracks[req.Cid] != nil || p.getPublishedTrackBySignalCid(req.Cid) != nil ||
++			p.getPublishedTrackBySdpCid(req.Cid) != nil || !slots.reserve(p.ID(), ti.Sid, time.Now()) {
++			p.pendingTracksLock.Unlock()
++			p.sendRequestResponse(&livekit.RequestResponse{
++				Reason:  livekit.RequestResponse_LIMIT_EXCEEDED,
++				Message: "All four screens are in use. You can keep watching and try again when a screen stops.",
++				Request: &livekit.RequestResponse_AddTrack{AddTrack: proto.CloneOf(req)},
++			})
++			return nil
++		}
++	}
+@@ -3548,0 +3577,4 @@ func (p *ParticipantImpl) mediaTrackReceived(
++		if ti.Type != ToProtoTrackKind(track.Kind()) {
++			p.pendingTracksLock.Unlock()
++			return nil, false, false, ridsFromSdp
++		}
+@@ -3549,0 +3582,4 @@ func (p *ParticipantImpl) mediaTrackReceived(
++		if mt == nil {
++			p.pendingTracksLock.Unlock()
++			return nil, false, false, ridsFromSdp
++		}
+@@ -3657,0 +3694,3 @@ func (p *ParticipantImpl) addMigratedTrack(cid string, ti *livekit.TrackInfo) *M
++	if mt == nil {
++		return nil
++	}
+@@ -3701,0 +3741,6 @@ func (p *ParticipantImpl) addMediaTrack(signalCid string, ti *livekit.TrackInfo)
++	if slots := p.params.ScreenSlots; slots != nil && ti.Type == livekit.TrackType_VIDEO {
++		if p.IsClosed() || !slots.activate(p.ID(), ti.Sid, time.Now()) {
++			p.releasePendingTrackLocked(livekit.TrackID(ti.Sid))
++			return nil
++		}
++	}
+@@ -3759,0 +3805 @@ func (p *ParticipantImpl) addMediaTrack(signalCid string, ti *livekit.TrackInfo)
++	ownerID := p.ID()
+@@ -3760,0 +3807,3 @@ func (p *ParticipantImpl) addMediaTrack(signalCid string, ti *livekit.TrackInfo)
++		if p.params.ScreenSlots != nil && ti.Type == livekit.TrackType_VIDEO {
++			p.params.ScreenSlots.release(ownerID, string(trackID))
++		}
+diff --git a/pkg/rtc/room.go b/pkg/rtc/room.go
+index a67adf7..963c719 100644
+--- a/pkg/rtc/room.go
++++ b/pkg/rtc/room.go
+@@ -93,0 +94 @@ type Room struct {
++	ScreenSlots ScreenSlots
+diff --git a/pkg/service/roommanager.go b/pkg/service/roommanager.go
+index 6a70c6b..645b6f6 100644
+--- a/pkg/service/roommanager.go
++++ b/pkg/service/roommanager.go
+@@ -328,0 +329,3 @@ func (r *RoomManager) StartSession(
++	if protectedRoom(protoRoom.Name) && (pi.Grants == nil || !voiceAuthorized(ctx, protoRoom.Name, string(pi.Identity), pi.Grants.Video)) {
++		return rtc.ErrPermissionDenied
++	}
+@@ -492,0 +496 @@ func (r *RoomManager) StartSession(
++		ScreenSlots:              &room.ScreenSlots,
+@@ -575,0 +580,16 @@ func (r *RoomManager) StartSession(
++	if protectedRoom(protoRoom.Name) {
++		go func(p types.LocalParticipant, roomName string) {
++			ticker := time.NewTicker(2 * time.Second)
++			defer ticker.Stop()
++			for range ticker.C {
++				if p.IsClosed() {
++					return
++				}
++				if !voiceAuthorized(context.Background(), roomName, string(p.Identity()), p.ClaimGrants().Video) {
++					p.Close(true, types.ParticipantCloseReasonServiceRequestRemoveParticipant, false)
++					return
++				}
++			}
++		}(participant, protoRoom.Name)
++	}
++
+@@ -1176,0 +1197,11 @@ func (r *RoomManager) refreshToken(participant types.LocalParticipant) error {
++	if grants.Video != nil && protectedRoom(grants.Video.Room) {
++		if !voiceAuthorized(context.Background(), grants.Video.Room, string(participant.Identity()), grants.Video) {
++			return rtc.ErrPermissionDenied
++		}
++		// Browsers reconnect through the authenticated same-origin signaling proxy.
++		// Do not deliver a bearer JWT into the browser SDK's URL-based resume path.
++		if grants.Video.GetCanSubscribe() {
++			return nil
++		}
++		validFor = 45 * time.Second
++	}
+diff --git a/pkg/service/utils.go b/pkg/service/utils.go
+index 0ee1d55..6ef6abd 100644
+--- a/pkg/service/utils.go
++++ b/pkg/service/utils.go
+@@ -401,0 +402,4 @@ func ValidateConnectRequest(
++	if protectedRoom(string(res.roomName)) && !voiceAuthorized(r.Context(), string(res.roomName), claims.Identity, claims.Video) {
++		return res, http.StatusForbidden, rtc.ErrPermissionDenied
++	}
++

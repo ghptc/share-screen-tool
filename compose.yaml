@@ -1,7 +1,7 @@
 name: whiterun-live
 services:
   livekit:
-    image: livekit/livekit-server:v1.13.11
+    build: ./infrastructure/livekit/admission
     command: ["--dev", "--config", "/etc/livekit.yaml", "--bind", "0.0.0.0"]
     volumes:
       - ./infrastructure/livekit/livekit.yaml:/etc/livekit.yaml:ro

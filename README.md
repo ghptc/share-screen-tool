@@ -2,6 +2,8 @@
 
 Whiterun Live is a local, screen-first streaming player. Open [the player](http://localhost:5173) to enter the default room. Share a screen or watch the streams already there. Each listener controls their own mix.
 
+For simulated Discord on this workstation, run `./scripts/start-discord-dev` and open the room link it prints. For a real private guild, configure the Portal callback and channel allowlist, then run `./scripts/prepare-discord-private --start`. The private player uses HTTPS on port 8443, verifies voice membership and admits viewers before granting any screen publication. [Discord setup and private-guild checks](docs/discord.md)
+
 ## Quick start on Arch Linux
 
 From a graphical user session with Docker Compose access, Go, a C toolchain with libopus and pkg-config, PipeWire tools, WirePlumber, and a working Wayland screen-sharing portal, run:
@@ -13,7 +15,8 @@ From a graphical user session with Docker Compose access, Go, a C toolchain with
 The script starts this project's Compose services and registers a private desktop-user socket for application audio. It creates missing local credentials in the ignored `.env` file. After startup, all regular sharing and listening controls are in the player.
 
 - **Share audio** starts checked beside **Start sharing**. Choose **Start sharing** and approve the monitor or window in the browser/Wayland picker. The player then connects one eligible running stereo application automatically.
-- If several applications are available, the player restores the last shared stream when it is still running, or opens a compact chooser. **Waiting for audio source** means the video is live and discovery will continue. Open the audio control to change sources or turn sharing off. Local and remote playback use your usual headset.
+- If several applications are available, the player restores the last shared stream when it is still running, or opens a compact chooser. **Waiting for audio source** means the video is live and discovery will continue. Use **Allow audio** to add a newly launched application, or revoke it from **Audio**. Authorized stereo applications share one isolated audio publication. Local and remote playback use your usual headset.
+- **Quality** targets the captured native size at 60 FPS. Choose a lower resolution or frame-rate cap during playback and inspect measured sender or receiver statistics.
 - Click a screen to focus it. **Back to grid** or Escape restores the grid. Turning off **Share audio** leaves the screen live. **Stop sharing** releases both.
 - If the browser blocks sound, select **Enable audio**. Remote mute and volume are in **Audio**.
 
@@ -145,3 +148,5 @@ Milestone 4.1: [audio behavior, Linux limitations, and native-helper proposal](d
 The [foreground helper CLI](docs/native-audio.md) remains available for invitation rooms and audio diagnostics. The local player starts capture directly from its Audio menu. [Same-headset measurements](docs/same-headset-render-results.json)
 
 The native helper now encodes exact 20 ms libopus frames with live pacing. See [audio quality stabilization and sustained timing evidence](docs/audio-quality-stabilization.md).
+
+For a manual release to the existing Ubuntu EC2 host, use the [rsync, Compose and rollback guide](docs/ec2.md).

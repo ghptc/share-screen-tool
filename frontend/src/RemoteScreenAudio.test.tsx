@@ -74,7 +74,7 @@ test('same-computer native feedback warning preserves independent listener conse
 test('player offers one autoplay gesture and preserves each listener preference after republication', async () => {
   const { default: PlayerStage } = await import('./PlayerStage')
   const bob = publication(), carol = publication()
-  const props = {screens:[], connected:true, sharing:false, busy:'', canPublish:true, error:'', start:vi.fn(), stop:vi.fn()}
+  const props = {quality:{height:0,fps:60},qualityBusy:false,changeQuality:vi.fn(),screens:[], connected:true, sharing:false, busy:'', canPublish:true, error:'', start:vi.fn(), stop:vi.fn()}
   const peers = [{identity:'b',owner:'Bob',publication:bob.pub},{identity:'c',owner:'Carol',publication:carol.pub}]
   play.mockRejectedValue(new DOMException('Needs gesture','NotAllowedError'))
   const {rerender} = render(<PlayerStage {...props} peers={peers}/>)

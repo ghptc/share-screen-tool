@@ -1,3 +1,4 @@
+import { applyVideoTarget, nativeTarget, type VideoTarget } from './videoQuality'
 import NativeAudio from './NativeAudio'
 import RemoteScreenAudio from './RemoteScreenAudio'
 import {ScreenTile, type Screen} from './ScreenTile'
@@ -8,7 +9,7 @@ import { ConnectionState, LocalAudioTrack, LocalVideoTrack, RoomEvent, Track, ty
 type Owned = { track: LocalVideoTrack; stream: MediaStream; ended: () => void; audio?: LocalAudioTrack; audioEnded?: () => void }
 export const captureOptions: DisplayMediaStreamOptions = {
   audio: false,
-  video: { width: { ideal: 2560 }, height: { ideal: 1440 }, frameRate: { ideal: 60 } },
+  video: { frameRate: { ideal: 60, max: 60 } },
 }
 
 function captureError(cause: unknown): string {
@@ -21,6 +22,27 @@ function captureError(cause: unknown): string {
   return cause instanceof Error ? cause.message : 'Screen sharing failed. You can try again.'
 }
 
+// The HTTP upgrade and the LiveKit permission event use separate connections.
+async function waitForPublishPermission(room: Room) {
+  if (room.localParticipant.permissions?.canPublish) return
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      window.clearTimeout(timeout)
+      room.off(RoomEvent.ParticipantPermissionsChanged, changed).off(RoomEvent.Disconnected, failed)
+    }
+    const changed = () => {
+      if (room.localParticipant.permissions?.canPublish) { cleanup(); resolve() }
+    }
+    const failed = () => {
+      cleanup()
+      reject(new Error('LiveKit could not confirm screen-sharing permission. Try sharing again.'))
+    }
+    const timeout = window.setTimeout(failed, 6000)
+    room.on(RoomEvent.ParticipantPermissionsChanged, changed).on(RoomEvent.Disconnected, failed)
+    changed()
+  })
+}
+
 function stopCapture(owned: Owned) {
   owned.track.mediaStreamTrack.removeEventListener('ended', owned.ended)
   if (owned.audioEnded) owned.audio?.mediaStreamTrack.removeEventListener('ended', owned.audioEnded)
@@ -29,7 +51,13 @@ function stopCapture(owned: Owned) {
   owned.stream.getTracks().forEach(track => track.stop())
 }
 
-export default function ScreenSharing({ room, canPublish, nativeAudioControl, player=false }: { player?: boolean; room: Room; canPublish: boolean; nativeAudioControl?: string }) {
+export default function ScreenSharing({ room, canPublish, nativeAudioControl, channel, player=false }: { player?: boolean; channel?: string; room: Room; canPublish: boolean; nativeAudioControl?: string }) {
+  async function authorizeScreen(enabled: boolean) {
+    if (!channel) return
+    const response = await fetch('/api/discord/'+channel+(enabled?'/publish':'/stop'), {method:'POST',
+      headers:{'Content-Type':'application/json',Authorization:'Bearer '+nativeAudioControl}, body:'{}',keepalive:!enabled, signal:AbortSignal.timeout(6000)})
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'Screen publication requires current voice-channel membership.')
+  }
   const [audioPeers, setAudioPeers] = useState<{ identity: string; owner: string; publication?: TrackPublication; publisherIdentity?: string }[]>([])
   const [nativeStatus, setNativeStatus] = useState('Native helper not connected.')
   const [shareAudio, setShareAudio] = useState(false)
@@ -40,6 +68,19 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
   const [busy, setBusy] = useState<'' | 'starting' | 'stopping'>('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [quality, setQuality] = useState(nativeTarget)
+  const [qualityBusy, setQualityBusy] = useState(false)
+  async function changeQuality(target: VideoTarget) {
+    const active = owned.current
+    if (!active) { setQuality(target); return }
+    if (!active.track.sender || qualityBusy) return
+    setQualityBusy(true)
+    try {
+      await applyVideoTarget(active.track.sender, active.track.mediaStreamTrack.getSettings(), target)
+      if (owned.current === active) { setQuality(target); setError('') }
+    } catch { setError('This browser could not apply the live quality change. Your screen is still shared.') }
+    finally { setQualityBusy(false) }
+  }
   const [settings, setSettings] = useState<MediaTrackSettings | null>(null)
   const owned = useRef<Owned | null>(null)
   const busyRef = useRef(false)
@@ -112,7 +153,7 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
         // LiveKit temporarily unpublishes live tracks during a full reconnect.
         // Preserve the consented capture so the SDK can republish it without a new prompt.
         if (room.state !== ConnectionState.Connected && room.state !== ConnectionState.Disconnected && owned.current.track.mediaStreamTrack.readyState === 'live') { sync(); return }
-        const previous = owned.current; owned.current = null; stopCapture(previous)
+        const previous = owned.current; owned.current = null; void authorizeScreen(false).catch(() => {}); stopCapture(previous)
         if (previous.audio) void room.localParticipant.unpublishTrack(previous.audio, true).catch(() => { if (mounted.current) setError('Audio cleanup failed. Leave and rejoin the room.') })
         if (mounted.current) { setSharing(false); setSettings(null) }
       }
@@ -130,7 +171,7 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
       for (const event of events) room.off(event, sync)
       room.off(RoomEvent.LocalTrackUnpublished, unpublished).off(RoomEvent.ConnectionStateChanged, state).off(RoomEvent.TrackSubscriptionFailed, failed)
       const active = owned.current; owned.current = null
-      if (active) { stopCapture(active); void unpublish(active).catch(() => {}) }
+      if (active) { stopCapture(active); void authorizeScreen(false).catch(() => {}); void unpublish(active).catch(() => {}) }
     }
   }, [room])
 
@@ -149,11 +190,13 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
     if ([...room.localParticipant.videoTrackPublications.values(), ...room.localParticipant.audioTrackPublications.values()].some(publication => publication.source === Track.Source.ScreenShare || publication.source === Track.Source.ScreenShareAudio)) {
       setError('A previous screen publication is still being removed. Wait or leave and rejoin before sharing again.'); return
     }
+    if (screens.length >= 4) { setError('All four screens are in use. You can keep watching and try again when a screen stops.'); return }
     if (!window.isSecureContext || !navigator.mediaDevices?.getDisplayMedia) { setError('Screen sharing requires a supported browser on localhost or HTTPS.'); return }
     busyRef.current = true; setBusy('starting'); setError(''); setNotice('')
     const ticket = ++generation.current
     let active: Owned | null = null
     let captured: MediaStream | null = null
+    let authorized = false
     try {
       // No awaits before this call: capture must retain the button's user activation.
       const stream = await navigator.mediaDevices.getDisplayMedia(shareAudio ? {
@@ -180,7 +223,7 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
           if (owned.current?.track !== track) return
           const endedCapture = owned.current
           owned.current = null
-          stopCapture(endedCapture)
+          stopCapture(endedCapture); void authorizeScreen(false).catch(() => {})
           void unpublish(endedCapture).catch(() => {
             if (mounted.current) setError('Capture ended, but cleanup failed. Leave and rejoin the room.')
           })
@@ -190,12 +233,27 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
       raw.addEventListener('ended', ended, { once: true })
       if (!captureIsCurrent(ticket, raw) || room.state !== ConnectionState.Connected) { stopCapture(active); return }
       owned.current = active
+      if (channel) {
+        await authorizeScreen(true)
+        authorized = true
+        if (captureIsCurrent(ticket, raw)) await waitForPublishPermission(room)
+        if (!captureIsCurrent(ticket, raw)) { stopCapture(active); await authorizeScreen(false); return }
+      }
       await room.localParticipant.publishTrack(track, { source: Track.Source.ScreenShare, videoCodec: 'vp8', simulcast: true,
         screenShareEncoding: { maxBitrate: 8_000_000, maxFramerate: 60 }, degradationPreference: 'balanced' })
       if (!captureIsCurrent(ticket, raw)) {
         stopCapture(active); await unpublish(active); return
       }
-      setSettings(raw.getSettings()); setSharing(true)
+      const initialTarget = {fps: quality.fps, height: 0}
+      if (quality.fps !== 60 && track.sender) {
+        try {
+          await applyVideoTarget(track.sender, raw.getSettings(), initialTarget)
+        } catch {
+          initialTarget.fps = nativeTarget.fps
+          setError('Your screen is live. This browser could not apply the selected frame-rate limit.')
+        }
+      }
+      setQuality(initialTarget); setSettings(raw.getSettings()); setSharing(true)
       setAudioStatus(!shareAudio ? 'Audio not requested.' : rawAudio ? 'Screen audio ended before publication. Video continues.' : offeredAudio
         ? 'Audio skipped because the browser could not confirm a tab with room audio excluded. On Linux, pair the native helper and select your game.'
         : 'Browser returned no screen audio. On Linux, pair the native helper and select your game.')
@@ -238,7 +296,11 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
         stopCapture(active)
         await unpublish(active).catch(() => {})
       } else { captured?.getTracks().forEach(track => track.stop()) }
-      if (mounted.current && ticket === generation.current) setError(captureError(cause))
+      if (authorized) await authorizeScreen(false).catch(() => {})
+      if (mounted.current && ticket === generation.current) {
+        const full = [...room.remoteParticipants.values()].flatMap(p => [...p.videoTrackPublications.values()]).filter(p => p.source === Track.Source.ScreenShare).length >= 4
+        setError(full ? 'All four screens are in use. You can keep watching and try again when a screen stops.' : captureError(cause))
+      }
     } finally {
       if (active && active.track.mediaStreamTrack.readyState === 'ended' && owned.current === active) owned.current = null
       busyRef.current = false
@@ -252,7 +314,7 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
     if (!active) return
     generation.current++; busyRef.current = true; setBusy('stopping'); setError('')
     owned.current = null; stopCapture(active); setSharing(false); setSettings(null)
-    try { await unpublish(active); setAudioStatus('Audio stopped.'); setNotice('Screen sharing stopped.') }
+    try { await Promise.all([unpublish(active), authorizeScreen(false)]); setAudioStatus('Audio stopped.'); setNotice('Screen sharing stopped.') }
     catch { if (mounted.current) setError('Local capture stopped, but unpublishing failed. Leave the room to finish cleanup.') }
     finally { busyRef.current = false; if (mounted.current) { setBusy(''); syncRef.current() } }
   }
@@ -260,7 +322,8 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
   const screenSid = screens.find(screen => screen.local)?.publication.trackSid
   if (player) return <PlayerStage screens={screens} peers={audioPeers} connected={connected} sharing={sharing} busy={busy}
     screen={sharing ? screenSid : undefined} control={nativeAudioControl} canPublish={canPublish} error={error}
-    start={() => void start()} stop={() => void stop()} />
+    quality={quality} nativeSettings={settings ?? undefined} nativeAudioStatus={nativeStatus} qualityBusy={qualityBusy || !!busy}
+    changeQuality={target => void changeQuality(target)} start={() => void start()} stop={() => void stop()} />
   return <div className="screen-sharing">
     <h3>Screens</h3>
     {canPublish ? <div className="share-controls">
@@ -270,7 +333,7 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
       {busy === 'stopping' && <p role="status">Stopping screen sharing…</p>}
       {busy === 'starting' && <><p role="status">Requesting or publishing your screen…</p><button onClick={() => { generation.current++; if (owned.current) stopCapture(owned.current); setNotice('Sharing request cancelled. Close any browser picker; pending selections will be discarded.') }}>Cancel sharing request</button></>}
     </div> : <p>Viewer mode. A separate publisher invitation is required to share a screen.</p>}
-    <p className="note">Requested capture target: 2560 × 1440 at 60 FPS. Actual capture and transmission may be lower. Audio is opt-in; only audio returned by the screen picker is used. Microphone capture is never requested.</p>
+    <p className="note">Requested capture target: native display dimensions at 60 FPS. Actual capture and transmission may be lower. Audio is opt-in; only audio returned by the screen picker is used. Microphone capture is never requested.</p>
     {canPublish && <p role="status" aria-label="Audio capture status">{audioStatus}</p>}
     {settings && <p className="note">Browser-reported capture settings at start: {settings.width ?? 'unknown'} × {settings.height ?? 'unknown'}, {settings.frameRate ?? 'unknown'} FPS. These are not measured transmission rates.</p>}
     {notice && <p role="status">{notice}</p>}

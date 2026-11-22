@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { TrackEvent, type TrackPublication } from 'livekit-client'
+import { TrackEvent, VideoQuality, type RemoteTrackPublication, type TrackPublication } from 'livekit-client'
 import MediaDiagnostics from './MediaDiagnostics'
 
 export type Screen = {
@@ -18,11 +18,13 @@ export function ScreenTile({
   connected,
   onFocus,
   hidden,
+  highest,
 }: {
   screen: Screen
   connected: boolean
   onFocus?: () => void
   hidden?: boolean
+  highest?: boolean
 }) {
   const container = useRef<HTMLElement>(null)
   const video = useRef<HTMLVideoElement>(null)
@@ -50,6 +52,27 @@ export function ScreenTile({
       element.srcObject = null
     }
   }, [screen.track])
+  useEffect(() => {
+    if (highest === undefined || screen.local || !screen.track || !video.current) return
+    const publication = screen.publication as RemoteTrackPublication
+    const element = video.current
+    function update() {
+      const visible = !hidden && document.visibilityState === 'visible'
+      publication.setEnabled(visible)
+      if (!visible) return
+      if (highest) publication.setVideoQuality(VideoQuality.HIGH)
+      else {
+        const rect = element.getBoundingClientRect()
+        publication.setVideoDimensions({ width: Math.max(1, Math.round(rect.width * devicePixelRatio)),
+          height: Math.max(1, Math.round(rect.height * devicePixelRatio)) })
+      }
+    }
+    const observer = new ResizeObserver(update)
+    observer.observe(element)
+    document.addEventListener('visibilitychange', update)
+    update()
+    return () => { observer.disconnect(); document.removeEventListener('visibilitychange', update) }
+  }, [highest, hidden, screen.track, screen.publication, screen.local])
   const state = !connected
     ? 'Reconnecting'
     : !screen.track
@@ -77,6 +100,7 @@ export function ScreenTile({
     <article
       ref={container}
       hidden={hidden}
+      data-track-sid={screen.publication.trackSid}
       className={onFocus ? 'player-tile' : 'stream-tile'}
       aria-label={`${screen.owner} screen${screen.local ? ' (you)' : ''}`}
     >

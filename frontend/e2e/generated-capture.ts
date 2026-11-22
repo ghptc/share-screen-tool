@@ -3,8 +3,8 @@ import type { BrowserContext } from '@playwright/test'
 declare global {
   interface Window { __screenTest: { calls: number; streams: MediaStream[]; denied: boolean; requested: DisplayMediaStreamOptions[]; endLatest: () => void } }
 }
-export async function generatedCapture(context: BrowserContext) {
-  await context.addInitScript(() => {
+export async function generatedCapture(context: BrowserContext, size = { width: 640, height: 360, fps: 15 }) {
+  await context.addInitScript((size) => {
     const endings = new WeakMap<MediaStreamTrack, () => void>()
     window.__screenTest = { calls: 0, streams: [], denied: false, requested: [], endLatest() {
       const track = this.streams[this.streams.length - 1].getVideoTracks()[0]
@@ -16,7 +16,7 @@ export async function generatedCapture(context: BrowserContext) {
     Object.defineProperty(navigator.mediaDevices, 'getDisplayMedia', { configurable: true, value: async (options: DisplayMediaStreamOptions) => {
       window.__screenTest.calls++; window.__screenTest.requested.push(options)
       if (window.__screenTest.denied) throw new DOMException('Test user denied capture', 'NotAllowedError')
-      const canvas = document.createElement('canvas'); canvas.width = 640; canvas.height = 360
+      const canvas = document.createElement('canvas'); canvas.width = size.width; canvas.height = size.height
       const context = canvas.getContext('2d')!
       let frame = 0
       const paint = () => {
@@ -24,8 +24,8 @@ export async function generatedCapture(context: BrowserContext) {
         context.fillStyle = 'white'; context.font = '36px sans-serif'; context.fillText(`Generated frame ${frame++}`, 24, 180)
       }
       paint()
-      const timer = window.setInterval(paint, 66)
-      const stream = canvas.captureStream(15)
+      const timer = window.setInterval(paint, 1000 / size.fps)
+      const stream = canvas.captureStream(size.fps)
       const track = stream.getVideoTracks()[0]
       // Firefox ignores untrusted MediaStreamTrack 'ended' dispatches. This is
       // explicitly a mocked native-ended delivery, not a real browser stop button.
@@ -55,5 +55,5 @@ export async function generatedCapture(context: BrowserContext) {
       window.__screenTest.streams.push(stream)
       return stream
     } })
-  })
+  }, size)
 }

@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Explicitly enable the deterministic Discord provider on this workstation.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+umask 077
+python3 - <<'PY'
+import fcntl, os, re, secrets
+from pathlib import Path
+with open('.env','a+') as f:
+    fcntl.flock(f, fcntl.LOCK_EX)
+    os.fchmod(f.fileno(),0o600)
+    f.seek(0)
+    config = f.read() or Path('.env.example').read_text()
+    for name in ('DISCORD_ROOM_KEY','DISCORD_ADMISSION_KEY','DISCORD_VOICE_KEY','DISCORD_FIXTURE_CLIENT_SECRET','DISCORD_FIXTURE_KEY'):
+        if not re.search(r'^'+name+r'=.+$',config,re.M):
+            line=name+'='+secrets.token_hex(32)
+            config=re.sub(r'^'+name+r'=$',line,config,flags=re.M) if re.search(r'^'+name+r'=$',config,re.M) else config.rstrip()+'\n'+line+'\n'
+    f.seek(0)
+    f.truncate()
+    f.write(config)
+PY
+export COMPOSE_FILE=compose.yaml:compose.discord-dev.yaml
+./scripts/start-local
+# Print the simulated command response without passing the control key in argv.
+python3 - <<'PY'
+import os, urllib.request
+from pathlib import Path
+values=dict(line.split('=',1) for line in Path('.env').read_text().splitlines() if '=' in line and not line.startswith('#'))
+port=os.environ.get('DISCORD_FIXTURE_PORT',values.get('DISCORD_FIXTURE_PORT','18091'))
+key=os.environ.get('DISCORD_FIXTURE_KEY',values['DISCORD_FIXTURE_KEY'])
+req=urllib.request.Request('http://127.0.0.1:'+port+'/live',headers={'Authorization':'Bearer '+key})
+print(urllib.request.urlopen(req,timeout=4).read().decode())
+PY

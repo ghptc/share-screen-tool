@@ -1,0 +1,107 @@
+name: whiterun-live-prod
+
+x-runtime: &runtime
+  restart: unless-stopped
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: local
+    options: {max-size: "10m", max-file: "3"}
+
+services:
+  livekit:
+    <<: *runtime
+    cpus: 2.0
+    mem_limit: 2g
+    image: whiterun-live/sfu:${WHITERUN_RELEASE:?WHITERUN_RELEASE}
+    pull_policy: never
+    command: ["--config", "/etc/livekit.yaml"]
+    configs:
+      - source: media
+        target: /etc/livekit.yaml
+    environment:
+      LIVEKIT_KEYS: "${DISCORD_MEDIA_KEY:?DISCORD_MEDIA_KEY}: ${DISCORD_MEDIA_SECRET:?DISCORD_MEDIA_SECRET}"
+      NODE_IP: ${PUBLIC_IPV4:?PUBLIC_IPV4}
+      DISCORD_ADMISSION_URL: http://backend:8080/internal/discord/admit
+      DISCORD_ADMISSION_KEY: ${DISCORD_PRIVATE_ADMISSION_KEY:?DISCORD_PRIVATE_ADMISSION_KEY}
+    ports:
+      - "${BIND_IPV4:?BIND_IPV4}:17891:17891/tcp"
+      - "${BIND_IPV4:?BIND_IPV4}:17892:17892/udp"
+  backend:
+    <<: *runtime
+    cpus: 0.50
+    mem_limit: 256m
+    image: whiterun-live/backend:${WHITERUN_RELEASE}
+    pull_policy: never
+    read_only: true
+    environment:
+      WHITERUN_ENV: production
+      DISCORD_MODE: discord
+      APP_ORIGIN: https://${PUBLIC_IPV4}:8443
+      BACKEND_ADDR: 0.0.0.0:8080
+      LIVEKIT_HTTP_URL: http://livekit:7880
+      LIVEKIT_WS_URL: wss://${PUBLIC_IPV4}:8443
+      LIVEKIT_API_KEY: ${DISCORD_MEDIA_KEY}
+      LIVEKIT_API_SECRET: ${DISCORD_MEDIA_SECRET}
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:?DISCORD_CLIENT_ID}
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:?DISCORD_CLIENT_SECRET}
+      DISCORD_CHANNELS: ${DISCORD_CHANNELS:?DISCORD_CHANNELS}
+      DISCORD_ROOM_KEY: ${DISCORD_PRIVATE_ROOM_KEY:?DISCORD_PRIVATE_ROOM_KEY}
+      DISCORD_ADMISSION_KEY: ${DISCORD_PRIVATE_ADMISSION_KEY}
+      DISCORD_VOICE_URL: http://discord-bot:8091
+      DISCORD_VOICE_KEY: ${DISCORD_PRIVATE_VOICE_KEY:?DISCORD_PRIVATE_VOICE_KEY}
+      DISCORD_DENIED_USERS: ${DISCORD_DENIED_USERS:-}
+    healthcheck:
+      test: ["CMD", "/server", "healthcheck", "http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+  discord-bot:
+    <<: *runtime
+    cpus: 0.25
+    mem_limit: 128m
+    image: whiterun-live/backend:${WHITERUN_RELEASE}
+    pull_policy: never
+    read_only: true
+    entrypoint: ["/discord-bot"]
+    environment:
+      WHITERUN_ENV: production
+      DISCORD_MODE: discord
+      APP_ORIGIN: https://${PUBLIC_IPV4}:8443
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:?DISCORD_BOT_TOKEN}
+      DISCORD_CHANNELS: ${DISCORD_CHANNELS}
+      DISCORD_ROOM_KEY: ${DISCORD_PRIVATE_ROOM_KEY}
+      DISCORD_VOICE_KEY: ${DISCORD_PRIVATE_VOICE_KEY}
+      DISCORD_VOICE_ADDR: 0.0.0.0:8091
+    depends_on:
+      backend: {condition: service_healthy}
+  player:
+    <<: *runtime
+    cpus: 0.50
+    mem_limit: 256m
+    image: whiterun-live/player:${WHITERUN_RELEASE}
+    pull_policy: never
+    environment:
+      PUBLIC_IPV4: ${PUBLIC_IPV4}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    ports:
+      - "${BIND_IPV4}:80:8080/tcp"
+      - "${BIND_IPV4}:8443:8443/tcp"
+    depends_on:
+      backend: {condition: service_healthy}
+
+volumes:
+  caddy-data:
+
+configs:
+  media:
+    content: |
+      port: 7880
+      rtc:
+        tcp_port: 17891
+        udp_port: 17892
+        use_external_ip: false
+      logging:
+        level: warn

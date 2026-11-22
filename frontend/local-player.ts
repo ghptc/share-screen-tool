@@ -55,7 +55,7 @@ export function localPlayer(): Plugin {
           origin.hostname === 'localhost' &&
           req.headers.host === origin.host &&
           !Object.keys(req.headers).some((h) => h === 'forwarded' || h.startsWith('x-forwarded-'))
-        if (path === '/' && req.method === 'GET') {
+        if ((path === '/' || /^\/r\/[A-Za-z0-9_-]{32}$/.test(path || '')) && req.method === 'GET') {
           res.setHeader('X-Frame-Options', 'DENY')
           res.setHeader('Content-Security-Policy', "frame-ancestors 'none'")
           res.setHeader('Cache-Control', 'no-store')

@@ -1,0 +1,25 @@
+{
+	admin off
+	auto_https disable_redirects
+	http_port 8080
+	# Browsers connecting to an IP may omit SNI. Docker sees the translated IP.
+	default_sni {$PUBLIC_IPV4}
+	# Proxy errors can contain the OAuth callback query. Keep ACME diagnostics.
+	log {
+		exclude http.log.error http.log.access
+	}
+}
+
+http://:8080 {
+	respond 404
+}
+
+https://{$PUBLIC_IPV4}:8443 {
+	tls {
+		issuer acme https://acme-v02.api.letsencrypt.org/directory {
+			profile shortlived
+			disable_tlsalpn_challenge
+		}
+	}
+	import /etc/caddy/player-routes.caddy
+}
