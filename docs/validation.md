@@ -70,7 +70,7 @@ curl -fsS http://127.0.0.1:5173/api/readyz
 {"livekit":"reachable","status":"ok"}
 ```
 
-Frontend logs: `VITE v8.3.6 ready in 114 ms`. Fetching `/` returned HTTP 200 with the Whiterun Live document, React refresh bootstrap, and `/src/main.tsx` entrypoint. React behavior is covered by jsdom component tests; no interactive graphical browser session or media test was performed.
+Frontend logs: `VITE v8.3.6 ready in 114 ms`. Fetching `/` returned HTTP 200 with the player document, React refresh bootstrap, and `/src/main.tsx` entrypoint. React behavior is covered by jsdom component tests; no interactive graphical browser session or media test was performed.
 
 Stopped **only this project's LiveKit** container, probed Go, and restarted LiveKit using a `finally` cleanup:
 
