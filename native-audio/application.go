@@ -46,7 +46,7 @@ func applicationAllowed(graph []graphObject, n graphObject) bool {
 	if n.Info.Props["node.link-group"] != nil || n.Info.Props["node.virtual"] == true || n.Info.Props["media.role"] == "Communication" {
 		return false
 	}
-	// Browser audio can mix games with Whiterun tabs. Never offer that ambiguous
+	// Browser audio can mix games with player tabs. Never offer that ambiguous
 	// stream as an isolated application. Explicit relay/mixing is not supported.
 	if ambiguousPlayback(n) {
 		return false
@@ -76,7 +76,7 @@ func selectApplication(graph []graphObject, serial uint64) (graphObject, error) 
 			return n, nil
 		}
 	}
-	return graphObject{}, errors.New("selected application unavailable or not an eligible local playback stream; browser/Whiterun mixes and device monitors are excluded")
+	return graphObject{}, errors.New("selected application unavailable or not an eligible local playback stream; browser/player mixes and device monitors are excluded")
 }
 func stereoPorts(graph []graphObject, node uint64, direction string) ([2]uint64, error) {
 	var ports [2]uint64

@@ -11,6 +11,7 @@ test('reports independent backend and SFU health and retries', async () => {
   }))
   vi.stubGlobal('fetch', fetchMock)
   render(<App />)
+  expect(screen.getByRole('heading', { name: 'Screen Share', level: 1 })).toBeInTheDocument()
   expect(await screen.findByText('available')).toBeInTheDocument()
   expect(await screen.findByText('unavailable')).toBeInTheDocument()
   fetchMock.mockResolvedValue({ ok: true, json: () => Promise.resolve({ status: 'ok', livekit: 'reachable' }) })

@@ -35,7 +35,7 @@ export default function InvitationRooms() {
   return (
     <main>
       <p className="eyebrow">SELF-HOSTED · LOCAL DEVELOPMENT</p>
-      <h1>Whiterun Live<span>.</span></h1>
+      <h1>Screen Share</h1>
       <p className="intro">A shared space for your screens. Built for a local-first, open-source streaming experience.</p>
       <Rooms />
       <section aria-labelledby="foundation-heading">

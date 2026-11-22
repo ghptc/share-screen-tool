@@ -84,7 +84,7 @@ export default function NativeAudio({ control, screen, status }: { control?: str
       {watchReady ? <>
         <label>One-time native audio pairing JSON<input type="password" autoComplete="off" readOnly value={pair} /></label>
         <button onClick={() => void copyPairingCode()}>Copy pairing code</button>
-        <p>Run <code>whiterun-audio --list-applications</code>, then <code>whiterun-audio --start --application SERIAL</code> with your game's number. Paste this single-use code into the helper within one minute.</p>
+        <p>Run your installed helper with <code>--list-applications</code>, then <code>--start --application SERIAL</code> with your game's number. Paste this single-use code into the helper within one minute.</p>
       </> : <p role="status">Connecting to the native audio session…</p>}
       <button onClick={() => void stop()}>Stop native audio session</button>
     </>}

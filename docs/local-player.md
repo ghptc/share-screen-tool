@@ -1,6 +1,6 @@
 # Local player
 
-The workstation joins `whiterun-local` when you open [Whiterun Live](http://localhost:5173). Each tab gets a separate identity. A refresh returns to the room as a listener. Available space goes to the screens, with a small control bar over the picture. The audio popover and screen focus respond to Escape, and the controls support Tab, Enter, and Space.
+The workstation joins `whiterun-local` when you open [Screen Share](http://localhost:5173). Each tab gets a separate identity. A refresh returns to the room as a listener. Available space goes to the screens, with a small control bar over the picture. The audio popover and screen focus respond to Escape, and the controls support Tab, Enter, and Space.
 
 ## Desktop startup and permissions
 

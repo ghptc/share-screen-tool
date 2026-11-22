@@ -1,4 +1,4 @@
-// Part of the Whiterun Live overlay for the pinned LiveKit server.
+// Part of the Screen Share overlay for the pinned LiveKit server.
 package rtc
 
 import (

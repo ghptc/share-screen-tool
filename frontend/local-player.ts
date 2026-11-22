@@ -39,7 +39,7 @@ export function localPlayer(): Plugin {
     )
   }
   return {
-    name: 'whiterun-local-player',
+    name: 'screen-share-local-player',
     apply: 'serve',
     configureServer(server) {
       const origin = new URL(process.env.APP_ORIGIN || 'http://localhost:5173')

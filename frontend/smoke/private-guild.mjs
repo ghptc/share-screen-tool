@@ -11,7 +11,7 @@ const root = fileURLToPath(new URL('../../', import.meta.url))
 delete process.env.DEBUG
 delete process.env.PWDEBUG
 const { firefox } = await import('playwright')
-const profile = mkdtempSync(join(tmpdir(), 'whiterun-discord-check-'))
+const profile = mkdtempSync(join(tmpdir(), 'screen-share-discord-check-'))
 chmodSync(profile, 0o700)
 function command(tool, args, input) {
   const result = spawnSync(tool, args, { cwd: root, input, encoding: 'utf8' })
@@ -31,7 +31,7 @@ function localRoom() {
     .update('whiterun:discord:voice:v1/' + pair).digest().subarray(0, 24).toString('base64url')
   const ca = command('docker', [...compose, 'exec', '-T', 'player', 'cat', '/data/caddy/pki/authorities/local/root.crt'])
   command('certutil', ['-N', '--empty-password', '-d', 'sql:' + profile])
-  command('certutil', ['-A', '-d', 'sql:' + profile, '-n', 'Whiterun private test CA', '-t', 'C,,'], ca)
+  command('certutil', ['-A', '-d', 'sql:' + profile, '-n', 'Screen Share private test CA', '-t', 'C,,'], ca)
   return new URL('/r/' + room, origin)
 }
 async function run() {

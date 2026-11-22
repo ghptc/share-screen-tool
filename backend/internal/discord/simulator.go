@@ -1,5 +1,5 @@
 // The fixture represents Discord behind the same OAuth and voice-authority
-// boundaries as the real services. It never creates Whiterun sessions or grants.
+// boundaries as the real services. It never creates application sessions or grants.
 package discord
 
 import (

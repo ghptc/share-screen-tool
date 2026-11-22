@@ -47,7 +47,7 @@ Preparation checks passed: generated WAV format/level/loop-boundary checks; posi
 
 ## Follow-up on 2026-11-10 — still unresolved
 
-The new investigation did **not** reproduce the reported listening failure. No helper or `pw-cat` was running at initial inspection, so the executable used during that failure cannot be verified retrospectively. The initial disk hash was `52bc039afd7e86fb2194b1a7fae7b97f4b4f0708e6537ac0dc31c9c5eb6f20ce`. Firefox and Spotify were routed to HyperX. Those Firefox streams cannot be identified as Whiterun receivers from PipeWire alone; a feedback-capable route is not proof of active feedback.
+The new investigation did **not** reproduce the reported listening failure. No helper or `pw-cat` was running at initial inspection, so the executable used during that failure cannot be verified retrospectively. The initial disk hash was `52bc039afd7e86fb2194b1a7fae7b97f4b4f0708e6537ac0dc31c9c5eb6f20ce`. Firefox and Spotify were routed to HyperX. Those Firefox streams cannot be identified as Screen Share receivers from PipeWire alone; a feedback-capable route is not proof of active feedback.
 
 Diagnostics were extended and the helper rebuilt. In a new 40-second live-desktop run, `/proc/3146133/exe` matched the new disk hash `ce7ae38441750810d16e0776e3fcf7d7d7e97b5a08958d866faeba51f33f9b30`. Three graph snapshots during capture showed one `pw-cat` node, with stereo monitor links. Chromium 158.0.8127.18 and Firefox 159.0 each had one inbound audio stream and one stream audio element. Their new playback streams were verified on the existing ALSA loopback sink, outside HyperX capture. This checks the controlled sessions, not the user's pre-existing tabs or all SFU publications.
 

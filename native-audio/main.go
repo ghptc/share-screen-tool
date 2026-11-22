@@ -1,4 +1,4 @@
-// Whiterun's foreground PipeWire application audio publisher.
+// Screen Share's foreground PipeWire application audio publisher.
 package main
 
 import (

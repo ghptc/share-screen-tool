@@ -73,7 +73,7 @@ def configuration(path=None):
     # Explicitly select this file even when the calling shell has overrides.
     names = PRIVATE + PROVIDER + OPTIONAL
     model = {"services": {"check": {"image": "unused", "environment": {k: "${" + k + ":-}" for k in names}}}}
-    result = subprocess.run(["docker", "compose", "--env-file", str(path), "-p", "whiterun-config-check", "-f", "-",
+    result = subprocess.run(["docker", "compose", "--env-file", str(path), "-p", "screen-share-config-check", "-f", "-",
                              "config", "--format", "json"], input=json.dumps(model), text=True, cwd=path.parent,
                             env=compose_env(), capture_output=True)
     if result.returncode:
@@ -82,7 +82,7 @@ def configuration(path=None):
 
 def api(method, path, authorization, form=None):
     conn = http.client.HTTPSConnection("discord.com", timeout=10)
-    headers = {"Authorization": authorization, "User-Agent": "WhiterunLive (private guild setup)"}
+    headers = {"Authorization": authorization, "User-Agent": "ScreenShare (private guild setup)"}
     if form is not None:
         headers["Content-Type"] = "application/x-www-form-urlencoded"
     try:

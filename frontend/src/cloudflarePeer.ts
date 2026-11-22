@@ -1,4 +1,4 @@
-// The application exchanges only Whiterun handles and WebRTC descriptions.
+// The application exchanges only room-scoped handles and WebRTC descriptions.
 export type Signal = (
   op: string,
   request: Record<string, unknown>,

@@ -133,7 +133,7 @@ function Player({ channel }: {channel?: string}) {
     }
   }, [attempt, channel])
   return (
-    <main className="player" aria-label="Whiterun Live player">
+    <main className="player" aria-label="Screen Share player">
       <header className="player-header">
         <h1>
           <span className="brand-symbol" aria-hidden="true">
@@ -141,7 +141,7 @@ function Player({ channel }: {channel?: string}) {
             <i />
             <i />
           </span>
-          Whiterun <span className="brand-live">Live</span>
+          Screen <span className="brand-secondary">Share</span>
         </h1>
         <span className="connection" role="status" data-connected={state === 'Connected'}>
           <i />

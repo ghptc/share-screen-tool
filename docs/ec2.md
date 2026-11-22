@@ -120,7 +120,7 @@ Expect **404** for the bare player root with successful system TLS verification.
    (cd native-audio && go build -o whiterun-audio .)
    native-audio/whiterun-audio --list-applications
    read -rp 'Game application serial: ' serial
-   systemd-ask-password 'Paste Whiterun pairing JSON' | native-audio/whiterun-audio --start --application "$serial"
+   systemd-ask-password 'Paste Screen Share pairing JSON' | native-audio/whiterun-audio --start --application "$serial"
    ```
 
 3. Open a copied link signed out and again with an account in the wrong channel. Verify sign-in and denial respectively. Move or disconnect an authorized member during playback, verify media and the native tap stop, and verify reconnect denial with existing credentials. Repeat across Gateway and backend restarts. Pending gates are real-guild authorization and original/refreshed token review on the deployed path. The SFU checks established sessions every two seconds. A silent Gateway outage can take up to the 65-second freshness interval to detect. Physical HyperX real-game listening remains a separate release gate. [Authorization tests and detection window](discord.md)
@@ -131,7 +131,7 @@ After acceptance, in the Ubuntu release directory mark this release current:
 ln -sfnT "releases/$(cat RELEASE)" /opt/services/whiterun-live/current
 ```
 
-**Rollback.** From the Ubuntu shell choose the last known-good release. During a failed upgrade `current` still points to the accepted release. After promotion use `previous`. On a first installation with no accepted release, run `./compose down` in the failed release. This keeps the TLS volume. A version change interrupts Whiterun sessions and requires fresh room authorization.
+**Rollback.** From the Ubuntu shell choose the last known-good release. During a failed upgrade `current` still points to the accepted release. After promotion use `previous`. On a first installation with no accepted release, run `./compose down` in the failed release. This keeps the TLS volume. A version change interrupts Screen Share sessions and requires fresh room authorization.
 
 ```bash
 set -e
@@ -146,7 +146,7 @@ docker image load -i images.tar.gz
 ln -sfnT "releases/$(cat RELEASE)" "$base/current"
 ```
 
-Keep the previous release, the protected server configuration and the TLS volume. The commands target only Whiterun. No global Docker cleanup or stack-wide host restart is part of the rollout.
+Keep the previous release, the protected server configuration and the TLS volume. The commands target only Screen Share. No global Docker cleanup or stack-wide host restart is part of the rollout.
 
 ## Transfer estimate
 

@@ -1,6 +1,6 @@
-# Whiterun Live
+# Screen Share
 
-Whiterun Live is a local, screen-first streaming player. Open [the player](http://localhost:5173) to enter the default room. Share a screen or watch the streams already there. Each listener controls their own mix.
+Screen Share is a local, screen-first streaming player. Open [the player](http://localhost:5173) to enter the default room. Share a screen or watch the streams already there. Each listener controls their own mix.
 
 For simulated Discord on this workstation, run `./scripts/start-discord-dev` and open the room link it prints. For a real private guild, configure the Portal callback and channel allowlist, then run `./scripts/prepare-discord-private --start`. The private player uses HTTPS on port 8443, verifies voice membership and admits viewers before granting any screen publication. [Discord setup and private-guild checks](docs/discord.md)
 
