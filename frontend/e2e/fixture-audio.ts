@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import type { BrowserContext } from '@playwright/test'
 
 declare global {
@@ -15,7 +16,7 @@ export async function fixtureAudio(context: BrowserContext, prefix: string) {
     window.fetch = async (input, options) => {
       const path = new URL(input instanceof Request ? input.url : input.toString(), location.href).pathname
       const selection = path === '/player/start' ? JSON.parse(String(options?.body)) : null
-      if (selection && [selection.source, ...(selection.additional ?? [])].some(id => !fixtures.has(id))) {
+      if (selection && [selection.source, ...(selection.additional ?? [])].some((id) => !fixtures.has(id))) {
         throw new Error('Test attempted to capture an unrelated application')
       }
       const response = await fetch(input, options)
@@ -26,4 +27,52 @@ export async function fixtureAudio(context: BrowserContext, prefix: string) {
       return window.__fullAudioRegistry ? response : Response.json(owned)
     }
   }, prefix)
+}
+
+export function testGame(name: string, frequency: number, sink: string) {
+  const child = spawn(
+    'pw-cat',
+    [
+      '--playback',
+      '--raw',
+      '--target',
+      sink,
+      '--rate',
+      '48000',
+      '--channels',
+      '2',
+      '--format',
+      's16',
+      '--properties',
+      'node.name=' + name,
+      '-',
+    ],
+    { stdio: ['pipe', 'ignore', 'pipe'] },
+  )
+  const closed = new Promise<void>((resolve, reject) => {
+    child.once('close', () => resolve())
+    child.once('error', reject)
+  })
+  const block = Buffer.alloc(960 * 4)
+  for (let i = 0; i < 960; i++) {
+    const sample = Math.round(300 * Math.sin((2 * Math.PI * frequency * i) / 48000))
+    block.writeInt16LE(sample, i * 4)
+    block.writeInt16LE(sample, i * 4 + 2)
+  }
+  const fill = () => {
+    while (!child.stdin.destroyed && child.stdin.write(block)) {
+      /* pw-cat clocks the stream */
+    }
+  }
+  child.stdin.on('drain', fill)
+  child.stdin.on('error', () => {})
+  fill()
+  return {
+    name,
+    stop: async () => {
+      child.stdin.destroy()
+      child.kill('SIGTERM')
+      await closed
+    },
+  }
 }
