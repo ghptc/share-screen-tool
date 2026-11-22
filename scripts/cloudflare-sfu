@@ -113,7 +113,7 @@ def run_player(provider):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("test-local", "test-hosted", "test-hosted-audio", "test-crash", "test-video-deadline", "player"))
+    parser.add_argument("mode", choices=("test-local", "test-hosted", "test-hosted-audio", "test-crash", "test-video-deadline", "test-video-expiry", "player"))
     parser.add_argument("--env-file", type=Path, default=ROOT / ".env")
     parser.add_argument("--browser", choices=("chromium", "firefox"), default="chromium")
     args = parser.parse_args()
@@ -132,7 +132,7 @@ def main():
     subprocess.run(["npm", "run", "build"], cwd=ROOT / "frontend", env=TOOLS, check=True)
     mode = "loopback" if args.mode == "test-local" else "cloudflare"
     with tempfile.TemporaryDirectory(prefix="wl-helper-") as temp:
-        extra = {}
+        extra = {"WHITERUN_SFU_BROWSER_EXPIRY": "1"} if args.mode == "test-video-expiry" else {}
         if args.mode == "test-hosted-audio":
             helper = str(Path(temp) / "audio-helper")
             subprocess.run(["go", "build", "-o", helper, "."], cwd=ROOT / "native-audio", env=TOOLS, check=True)

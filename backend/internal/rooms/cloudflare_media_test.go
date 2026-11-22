@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -142,6 +143,11 @@ func TestTwoBrowserMedia(t *testing.T) {
 	server := httptest.NewUnstartedServer(mux)
 	origin := "https://" + server.Listener.Addr().String()
 	fixture := newCFFixture(t, origin, media)
+	expiry := os.Getenv("WHITERUN_SFU_BROWSER_EXPIRY") == "1"
+	var offset atomic.Int64
+	if expiry {
+		fixture.a.now = func() time.Time { return time.Now().Add(time.Duration(offset.Load())) }
+	}
 	mux.Handle("/api/", http.StripPrefix("/api", fixture.api))
 	browserTag := "sfu-audio-" + rand.Text()
 	var links []func(bool) int
@@ -198,7 +204,7 @@ func TestTwoBrowserMedia(t *testing.T) {
 			cmd.Env = append(cmd.Env, name+"="+v)
 		}
 	}
-	data, _ := json.Marshal(map[string]any{"origin": server.URL, "cookies": cookies, "ref": fixture.ref, "hosted": mode == "cloudflare", "withAudio": links != nil, "browserTag": browserTag})
+	data, _ := json.Marshal(map[string]any{"origin": server.URL, "cookies": cookies, "ref": fixture.ref, "hosted": mode == "cloudflare", "withAudio": links != nil, "browserTag": browserTag, "expiry": expiry})
 	cmd.Stdin = strings.NewReader(string(data))
 	stream, err := cmd.StdoutPipe()
 	if err != nil {
@@ -218,6 +224,9 @@ func TestTwoBrowserMedia(t *testing.T) {
 					t.Errorf("expected two isolated PipeWire links on peer %d; observed %d", i, n)
 				}
 			}
+		} else if expiry && line == "expire-video-grants" {
+			offset.Store(int64(10 * time.Hour))
+			switched = true
 		} else if line == "switch-publisher-channel" {
 			fixture.voice(t, "33", "23")
 			switched = true

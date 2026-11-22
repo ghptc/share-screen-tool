@@ -3,7 +3,7 @@
 import { chromium, firefox } from 'playwright'
 import { readFileSync } from 'node:fs'
 
-const { origin, ref, cookies, hosted, withAudio, browserTag } = JSON.parse(readFileSync(0, 'utf8'))
+const { origin, ref, cookies, hosted, withAudio, browserTag, expiry } = JSON.parse(readFileSync(0, 'utf8'))
 const engine = process.env.E2E_BROWSER === 'firefox' ? firefox : chromium
 const browsers = []
 let stage = 'launch'
@@ -213,6 +213,7 @@ try {
           return res
         }
       })
+      if (expiry) await page.clock.install()
       await page.goto(origin + '/r/' + ref)
       await page.getByRole('button', { name: 'Start sharing' }).waitFor({ timeout: 10000 })
       if (await page.evaluate(() => window.captureCount !== 0)) throw Error('Capture before consent')
@@ -239,31 +240,79 @@ try {
     await measureAudio(pages[1], 1)
     console.log('audio-received')
   }
-  stage = 'stop'
-  await pages[1].getByRole('button', { name: 'Stop sharing' }).click()
-  await pages[0]
-    .getByRole('article', { name: 'Remote screen' })
-    .waitFor({ state: 'detached', timeout: 10000 })
-  if (await pages[1].evaluate(() => window.testCapture.getTracks().some((t) => t.readyState !== 'ended')))
-    throw Error('Capture remained live')
-  stage = 'voice departure'
-  // The Go driver delivers the event over the fixture's private voice authority.
-  console.log('switch-publisher-channel')
-  await pages[0].getByRole('heading', { name: 'Player unavailable' }).waitFor({ timeout: 12000 })
-  await pages[1].getByRole('heading', { name: 'No active screens' }).waitFor({ timeout: 10000 })
-  if (await pages[0].evaluate(() => window.testCapture.getTracks().some((t) => t.readyState !== 'ended')))
-    throw Error('Revoked capture remained live')
-  if (withAudio) await pages[1].locator('audio').waitFor({ state: 'detached', timeout: 6000 })
-  console.log(
-    JSON.stringify({
-      audio,
-      audioToggle: withAudio,
-      browser: engine.name(),
-      received: results,
-      explicitStop: true,
-      voiceDeparture: true,
-    }),
-  )
+  if (expiry) {
+    stage = 'fixed video deadline'
+    const unexpected = []
+    for (const page of pages)
+      page.on('request', (request) => {
+        const path = new URL(request.url()).pathname
+        if (path.endsWith('/join') || path.includes('/auth/') || path.endsWith('/renew'))
+          unexpected.push(true)
+      })
+    // Advance the browser timers while both screens are actually being decoded.
+    await Promise.all(pages.map((p) => p.clock.fastForward(36_000_000)))
+    console.log('expire-video-grants')
+    for (const page of pages) {
+      await page.getByRole('heading', { name: 'Session expired — reopen the link' }).waitFor()
+      if (
+        !(await page.evaluate(
+          () =>
+            window.testCapture.getTracks().every((t) => t.readyState === 'ended') &&
+            window.testPeers.every((p) => p.connectionState === 'closed') &&
+            !document.querySelector('video'),
+        ))
+      )
+        throw Error('Expired media remained live')
+      await page.reload()
+      await page.getByRole('heading', { name: 'Session expired — reopen the link' }).waitFor()
+      await page.clock.fastForward(30_000)
+    }
+    if (unexpected.length) throw Error('Expired tab attempted authorization')
+    stage = 'manual re-entry'
+    const context = pages[1].context()
+    await pages[1].close()
+    const fresh = await context.newPage()
+    const joinStatuses = []
+    let callbacks = 0
+    fresh.on('response', (response) => {
+      const path = new URL(response.url()).pathname
+      if (path.endsWith('/join')) joinStatuses.push(response.status())
+      if (path.endsWith('/discord/callback') && response.status() === 303) callbacks++
+    })
+    await fresh.goto(origin + '/r/' + ref)
+    await fresh.getByRole('button', { name: 'Start sharing' }).waitFor({ timeout: 15000 })
+    if (callbacks !== 1 || joinStatuses.join(',') !== '401,200') throw Error('Fresh OAuth admission failed')
+    if (await fresh.evaluate(() => window.captureCount !== 0)) throw Error('Re-entry started capture')
+    console.log(
+      JSON.stringify({ browser: engine.name(), received: results, expiredTabs: 2, automaticAuthRequests: 0, freshOAuth: true }),
+    )
+  } else {
+    stage = 'stop'
+    await pages[1].getByRole('button', { name: 'Stop sharing' }).click()
+    await pages[0]
+      .getByRole('article', { name: 'Remote screen' })
+      .waitFor({ state: 'detached', timeout: 10000 })
+    if (await pages[1].evaluate(() => window.testCapture.getTracks().some((t) => t.readyState !== 'ended')))
+      throw Error('Capture remained live')
+    stage = 'voice departure'
+    // The Go driver delivers the event over the fixture's private voice authority.
+    console.log('switch-publisher-channel')
+    await pages[0].getByRole('heading', { name: 'Player unavailable' }).waitFor({ timeout: 12000 })
+    await pages[1].getByRole('heading', { name: 'No active screens' }).waitFor({ timeout: 10000 })
+    if (await pages[0].evaluate(() => window.testCapture.getTracks().some((t) => t.readyState !== 'ended')))
+      throw Error('Revoked capture remained live')
+    if (withAudio) await pages[1].locator('audio').waitFor({ state: 'detached', timeout: 6000 })
+    console.log(
+      JSON.stringify({
+        audio,
+        audioToggle: withAudio,
+        browser: engine.name(),
+        received: results,
+        explicitStop: true,
+        voiceDeparture: true,
+      }),
+    )
+  }
 } catch (error) {
   console.log(
     'Failure during ' +
