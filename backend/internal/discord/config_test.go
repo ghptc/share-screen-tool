@@ -37,4 +37,14 @@ func TestDiscordOAuthSecretCannotSignMedia(t *testing.T) {
 	if _, err := Load(origin, "livekit-private", strings.Repeat("e", 32), ""); err != nil {
 		t.Fatal(err)
 	}
+	for _, env := range []string{"", "development", "prodution"} {
+		t.Setenv("WHITERUN_ENV", env)
+		if _, err := Load(origin, "livekit-private", strings.Repeat("e", 32), ""); err == nil || PrivateProfile() {
+			t.Fatal("real provider accepted outside its explicit profile")
+		}
+	}
+	t.Setenv("DISCORD_MODE", "")
+	if _, err := Load(origin, "livekit-private", strings.Repeat("e", 32), ""); err == nil {
+		t.Fatal("unknown environment selected local mode")
+	}
 }

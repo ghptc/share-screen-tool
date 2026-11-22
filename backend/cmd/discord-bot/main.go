@@ -19,6 +19,9 @@ import (
 )
 
 func main() {
+	if !discord.PrivateProfile() {
+		log.Fatal("real Discord bot requires WHITERUN_ENV=production and DISCORD_MODE=discord")
+	}
 	dir, err := discord.NewDirectory(os.Getenv("DISCORD_ROOM_KEY"), os.Getenv("DISCORD_CHANNELS"))
 	if err != nil {
 		log.Fatal(err)
@@ -63,6 +66,9 @@ func main() {
 			log.Fatal("invalid bot configuration")
 		}
 		s.Identify.Intents = dg.IntentsGuilds | dg.IntentsGuildVoiceStates
+		// SDK diagnostics can include raw interaction payloads. Report failures
+		// here without the provider's payload, request URL or credentials.
+		s.LogLevel = -1
 		gateway := new(discord.Gateway)
 		s.SyncEvents = true
 		s.ShouldReconnectOnError = false
@@ -104,6 +110,8 @@ func main() {
 			case <-ctx.Done():
 			case <-offline:
 			}
+		} else {
+			log.Print("Discord Gateway connection failed")
 		}
 		gateway.Offline()
 		mu.Lock()

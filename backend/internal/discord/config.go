@@ -19,8 +19,8 @@ type Config struct {
 // Production provider origins cannot be overridden through the environment.
 func Load(origin, lkKey, lkSecret, playerKey string) (*Config, error) {
 	mode := os.Getenv("DISCORD_MODE")
-	prod := os.Getenv("WHITERUN_ENV") == "production"
-	if mode == "" && !prod {
+	env := os.Getenv("WHITERUN_ENV")
+	if mode == "" && (env == "" || env == "development") {
 		return nil, nil
 	}
 	mock := mode == "simulator"
@@ -28,7 +28,7 @@ func Load(origin, lkKey, lkSecret, playerKey string) (*Config, error) {
 	if err != nil || u.Hostname() == "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil || u.Path != "" {
 		return nil, errors.New("invalid Discord origin")
 	}
-	if (mode != "discord" && !mock) || (mock && (prod || os.Getenv("WHITERUN_ENV") != "development" || u.Scheme != "http" || u.Hostname() != "localhost")) {
+	if (!mock && !PrivateProfile()) || (mock && (env != "development" || u.Scheme != "http" || u.Hostname() != "localhost")) {
 		return nil, errors.New("invalid Discord mode for this deployment")
 	}
 	if !mock && (u.Scheme != "https" || playerKey != "" || lkKey == "devkey" || len(lkSecret) < 32) {
@@ -61,6 +61,10 @@ func Load(origin, lkKey, lkSecret, playerKey string) (*Config, error) {
 		return nil, errors.New("use independent credentials for OAuth, LiveKit, room mapping, voice queries and SFU admission")
 	}
 	return c, nil
+}
+
+func PrivateProfile() bool {
+	return os.Getenv("WHITERUN_ENV") == "production" && os.Getenv("DISCORD_MODE") == "discord"
 }
 
 // IndependentCredentials protects against accidentally giving an unrelated
