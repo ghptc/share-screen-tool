@@ -113,13 +113,17 @@ def run_player(provider):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("test-local", "test-hosted", "test-hosted-audio", "test-crash", "player"))
+    parser.add_argument("mode", choices=("test-local", "test-hosted", "test-hosted-audio", "test-crash", "test-video-deadline", "player"))
     parser.add_argument("--env-file", type=Path, default=ROOT / ".env")
     parser.add_argument("--browser", choices=("chromium", "firefox"), default="chromium")
     args = parser.parse_args()
     provider = {} if args.mode == "test-local" else credentials(args.env_file)
     if args.mode == "player":
         run_player(provider)
+        return
+    if args.mode == "test-video-deadline":
+        subprocess.run(["go", "test", "-count=1", "-v", "-run", "^TestHostedVideoDeadline$", "./internal/cloudsfu"],
+                       cwd=ROOT / "backend", env={**TOOLS, **provider, "WHITERUN_VIDEO_DEADLINE_TEST": "1"}, check=True)
         return
     if args.mode == "test-crash":
         subprocess.run(["go", "test", "-count=1", "-v", "-run", "^TestHostedControllerCrash$", "./internal/cloudsfu"],

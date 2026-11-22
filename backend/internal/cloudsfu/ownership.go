@@ -20,6 +20,25 @@ type OwnedMedia struct {
 	directory *os.File
 }
 
+// The application supplies the fixed deadline of the authenticated room. It
+// is distinct from the shorter HTTP timeout for an individual provider call.
+type expiryKey struct{}
+
+func WithAuthorizationExpiry(ctx context.Context, until time.Time) context.Context {
+	return context.WithValue(ctx, expiryKey{}, until)
+}
+func authorizationExpiry(ctx context.Context) time.Time {
+	if until, ok := ctx.Value(expiryKey{}).(time.Time); ok {
+		return until
+	}
+	// Standalone callers also have a finite maximum lifetime.
+	return time.Now().Add(36000 * time.Second)
+}
+
+type journalEntry struct {
+	ownership
+	ExpiresAt time.Time `json:"expiresAt,omitempty"`
+}
 type ownership struct {
 	Mid         string `json:"mid"`
 	Publication string `json:"publication"`
@@ -51,6 +70,10 @@ func openOwner(root, app string, media Media) (*OwnedMedia, error) {
 	return &OwnedMedia{media, dir}, nil
 }
 func (o *OwnedMedia) record(id string, entry ownership) error {
+	return o.save(id, journalEntry{ownership: entry})
+}
+
+func (o *OwnedMedia) save(id string, entry journalEntry) error {
 	if !resourceID.MatchString(id) {
 		return errResponse
 	}
@@ -76,14 +99,22 @@ func (o *OwnedMedia) record(id string, entry ownership) error {
 	return o.directory.Sync()
 }
 func (o *OwnedMedia) Publish(ctx context.Context, id, name, mid, offer string) (string, error) {
-	if err := o.record(id, ownership{mid, name, "local"}); err != nil {
+	until := authorizationExpiry(ctx)
+	if !time.Now().Before(until) {
+		return "", errors.New("room authorization expired")
+	}
+	if err := o.save(id, journalEntry{ownership{mid, name, "local"}, until}); err != nil {
 		return "", err
 	}
 	return o.Media.Publish(ctx, id, name, mid, offer)
 }
 func (o *OwnedMedia) Subscribe(ctx context.Context, id, source, name string) (string, string, error) {
-	entry := ownership{"", name, "remote"}
-	if err := o.record(id, entry); err != nil {
+	until := authorizationExpiry(ctx)
+	if !time.Now().Before(until) {
+		return "", "", errors.New("room authorization expired")
+	}
+	entry := journalEntry{ownership{"", name, "remote"}, until}
+	if err := o.save(id, entry); err != nil {
 		return "", "", err
 	}
 	mid, sdp, err := o.Media.Subscribe(ctx, id, source, name)
@@ -91,7 +122,7 @@ func (o *OwnedMedia) Subscribe(ctx context.Context, id, source, name string) (st
 		return "", "", err
 	}
 	entry.Mid = mid
-	if err = o.record(id, entry); err != nil {
+	if err = o.save(id, entry); err != nil {
 		return mid, "", err
 	}
 	return mid, sdp, nil
@@ -112,6 +143,12 @@ func (o *OwnedMedia) Close(ctx context.Context, id, mid string) error {
 
 // Recovery revokes every old grant. OAuth cookies or helper leases never resume.
 func (o *OwnedMedia) recover(ctx context.Context) error {
+	return o.reap(ctx, time.Time{})
+}
+
+// A zero cutoff is exclusive crash/startup recovery. During live enforcement
+// the controller may have just removed a file or completed its SDP exchange.
+func (o *OwnedMedia) reap(ctx context.Context, cutoff time.Time) error {
 	entries, err := os.ReadDir(o.directory.Name())
 	if err != nil {
 		return err
@@ -129,9 +166,15 @@ func (o *OwnedMedia) recover(ctx context.Context) error {
 			return errors.New("invalid SFU ownership journal")
 		}
 		data, err := os.ReadFile(filepath.Join(o.directory.Name(), file.Name()))
-		var entry ownership
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		var entry journalEntry
 		if err != nil || json.Unmarshal(data, &entry) != nil || (entry.Direction != "local" && entry.Direction != "remote") || !resourceID.MatchString(entry.Publication) || (entry.Mid != "" && !resourceID.MatchString(entry.Mid)) {
 			result = errors.New("unreadable SFU ownership record")
+			continue
+		}
+		if !cutoff.IsZero() && cutoff.Before(entry.ExpiresAt) {
 			continue
 		}
 		if err = o.Close(ctx, id, entry.Mid); err != nil {
@@ -222,8 +265,20 @@ func WatchController(path string) error {
 		return err
 	}
 	ack.Close()
-	_, _ = io.Copy(io.Discard, parent)
+	disconnected := make(chan struct{})
+	go func() { _, _ = io.Copy(io.Discard, parent); close(disconnected) }()
 	o := &OwnedMedia{media, dir}
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+live:
+	for {
+		select {
+		case <-disconnected:
+			break live
+		case now := <-tick.C:
+			_ = o.reap(context.Background(), now)
+		}
+	}
 	delay := time.Second
 	for {
 		if err = o.recover(context.Background()); err == nil {
