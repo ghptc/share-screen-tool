@@ -483,3 +483,18 @@ test('an unsupported sender limit leaves the approved screen live', async () => 
   expect(screen.getByRole('button', { name: 'Stop sharing' })).toBeEnabled()
   expect(raw.stop).not.toHaveBeenCalled()
 })
+
+test('Discord publication waits for the local LiveKit permission event after the HTTP upgrade', async () => {
+  const permission = { canPublish: false }
+  Object.assign(room.localParticipant, { permissions: permission })
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ publishing: true })))
+  render(<ScreenSharing room={room as unknown as Room} channel="channel" canPublish />)
+  fireEvent.click(screen.getByRole('button', { name: 'Start sharing' }))
+  await waitFor(() => expect(room.listeners.get(RoomEvent.ParticipantPermissionsChanged)?.size).toBe(1))
+  expect(room.localParticipant.publishTrack).not.toHaveBeenCalled()
+  permission.canPublish = true
+  act(() => room.emit(RoomEvent.ParticipantPermissionsChanged))
+  await waitFor(() => expect(room.localParticipant.publishTrack).toHaveBeenCalledTimes(1))
+  expect(capture).toHaveBeenCalledTimes(1)
+  expect(room.listeners.get(RoomEvent.ParticipantPermissionsChanged)?.size).toBe(0)
+})

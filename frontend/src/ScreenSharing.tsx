@@ -22,6 +22,27 @@ function captureError(cause: unknown): string {
   return cause instanceof Error ? cause.message : 'Screen sharing failed. You can try again.'
 }
 
+// The HTTP upgrade and the LiveKit permission event use separate connections.
+async function waitForPublishPermission(room: Room) {
+  if (room.localParticipant.permissions?.canPublish) return
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      window.clearTimeout(timeout)
+      room.off(RoomEvent.ParticipantPermissionsChanged, changed).off(RoomEvent.Disconnected, failed)
+    }
+    const changed = () => {
+      if (room.localParticipant.permissions?.canPublish) { cleanup(); resolve() }
+    }
+    const failed = () => {
+      cleanup()
+      reject(new Error('LiveKit could not confirm screen-sharing permission. Try sharing again.'))
+    }
+    const timeout = window.setTimeout(failed, 6000)
+    room.on(RoomEvent.ParticipantPermissionsChanged, changed).on(RoomEvent.Disconnected, failed)
+    changed()
+  })
+}
+
 function stopCapture(owned: Owned) {
   owned.track.mediaStreamTrack.removeEventListener('ended', owned.ended)
   if (owned.audioEnded) owned.audio?.mediaStreamTrack.removeEventListener('ended', owned.audioEnded)
@@ -211,12 +232,13 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, ch
       active = { track, stream, ended }
       raw.addEventListener('ended', ended, { once: true })
       if (!captureIsCurrent(ticket, raw) || room.state !== ConnectionState.Connected) { stopCapture(active); return }
+      owned.current = active
       if (channel) {
         await authorizeScreen(true)
         authorized = true
-        if (!captureIsCurrent(ticket,raw)) { stopCapture(active); await authorizeScreen(false); return }
+        if (captureIsCurrent(ticket, raw)) await waitForPublishPermission(room)
+        if (!captureIsCurrent(ticket, raw)) { stopCapture(active); await authorizeScreen(false); return }
       }
-      owned.current = active
       await room.localParticipant.publishTrack(track, { source: Track.Source.ScreenShare, videoCodec: 'vp8', simulcast: true,
         screenShareEncoding: { maxBitrate: 8_000_000, maxFramerate: 60 }, degradationPreference: 'balanced' })
       if (!captureIsCurrent(ticket, raw)) {
@@ -270,11 +292,11 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, ch
       }
       syncRef.current()
     } catch (cause) {
-      if (authorized) await authorizeScreen(false).catch(() => {})
       if (active) {
         stopCapture(active)
         await unpublish(active).catch(() => {})
       } else { captured?.getTracks().forEach(track => track.stop()) }
+      if (authorized) await authorizeScreen(false).catch(() => {})
       if (mounted.current && ticket === generation.current) {
         const full = [...room.remoteParticipants.values()].flatMap(p => [...p.videoTrackPublications.values()]).filter(p => p.source === Track.Source.ScreenShare).length >= 4
         setError(full ? 'All four screens are in use. You can keep watching and try again when a screen stops.' : captureError(cause))
