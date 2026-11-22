@@ -4,6 +4,8 @@ Whiterun Live is a local, screen-first streaming player. Open [the player](http:
 
 For simulated Discord on this workstation, run `./scripts/start-discord-dev` and open the room link it prints. For a real private guild, configure the Portal callback and channel allowlist, then run `./scripts/prepare-discord-private --start`. The private player uses HTTPS on port 8443, verifies voice membership and admits viewers before granting any screen publication. [Discord setup and private-guild checks](docs/discord.md)
 
+The optional Cloudflare Realtime SFU prototype runs alongside the local player on separate loopback ports. [Prototype setup, evidence and release blockers](docs/cloudflare-sfu.md)
+
 ## Quick start on Arch Linux
 
 From a graphical user session with Docker Compose access, Go, a C toolchain with libopus and pkg-config, PipeWire tools, WirePlumber, and a working Wayland screen-sharing portal, run:
