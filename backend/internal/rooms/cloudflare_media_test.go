@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -143,15 +144,29 @@ func TestTwoBrowserMedia(t *testing.T) {
 	fixture := newCFFixture(t, origin, media)
 	mux.Handle("/api/", http.StripPrefix("/api", fixture.api))
 	browserTag := "sfu-audio-" + rand.Text()
-	var links func(bool) int
+	var links []func(bool) int
 	if helper := os.Getenv("WHITERUN_SFU_TEST_HELPER"); helper != "" {
 		if mode != "cloudflare" {
 			t.Fatal("hosted audio requires Cloudflare")
 		}
-		links = hostedDesktop(t, ctx, mux, fixture, helper, browserTag)
-		if links(false) != 0 {
-			t.Fatal("capture active before consent")
+		desktops := map[string]*http.ServeMux{}
+		for i, tones := range [][2]float64{{750, 1500}, {1000, 2000}} {
+			desktop := http.NewServeMux()
+			desktops[strconv.Itoa(33+i)] = desktop
+			check := hostedDesktop(t, ctx, desktop, fixture, helper, browserTag+"-"+strconv.Itoa(i), tones)
+			if check(false) != 0 {
+				t.Fatal("capture active before consent")
+			}
+			links = append(links, check)
 		}
+		mux.HandleFunc("/player/", func(w http.ResponseWriter, r *http.Request) {
+			session, ok := fixture.a.discord.oauth.Current(r)
+			if !ok || desktops[session.User] == nil {
+				http.Error(w, "Forbidden", 403)
+				return
+			}
+			desktops[session.User].ServeHTTP(w, r)
+		})
 	}
 	dist := "../../../frontend/dist"
 	if _, err := os.Stat(filepath.Join(dist, "index.html")); err != nil {
@@ -198,8 +213,10 @@ func TestTwoBrowserMedia(t *testing.T) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "audio-received" && links != nil {
-			if n := links(true); n != 2 {
-				t.Errorf("expected two isolated PipeWire links; observed %d", n)
+			for i, check := range links {
+				if n := check(true); n != 2 {
+					t.Errorf("expected two isolated PipeWire links on peer %d; observed %d", i, n)
+				}
 			}
 		} else if line == "switch-publisher-channel" {
 			fixture.voice(t, "33", "23")
@@ -211,11 +228,11 @@ func TestTwoBrowserMedia(t *testing.T) {
 	if err = cmd.Wait(); err != nil || !switched {
 		t.Fatalf("browser media test failed: %s", report)
 	}
-	if links != nil {
-		for until := time.Now().Add(5 * time.Second); time.Now().Before(until) && links(false) != 0; {
+	for _, check := range links {
+		for until := time.Now().Add(5 * time.Second); time.Now().Before(until) && check(false) != 0; {
 			time.Sleep(100 * time.Millisecond)
 		}
-		if links(false) != 0 {
+		if check(false) != 0 {
 			t.Fatal("native capture survived departure")
 		}
 	}

@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs'
 
 const { origin, ref, cookies, hosted, withAudio, browserTag } = JSON.parse(readFileSync(0, 'utf8'))
 const engine = process.env.E2E_BROWSER === 'firefox' ? firefox : chromium
-let browser
+const browsers = []
 let stage = 'launch'
 
 async function measure(page, i) {
@@ -43,7 +43,7 @@ async function measure(page, i) {
   throw Error('Remote playback timed out')
 }
 
-async function measureAudio(page) {
+async function measureAudio(page, listener) {
   const player = page.locator('audio')
   await player.waitFor({ state: 'attached', timeout: 25000 })
   // Resume the analyser using a real user gesture on the existing audio menu.
@@ -73,12 +73,12 @@ async function measureAudio(page) {
   let last
   let first
   for (let i = 0; i < 60; i++) {
-    last = await page.evaluate(async () => {
+    last = await page.evaluate(async (listener) => {
       const { ctx, analysers } = window.testAudio
       const levels = analysers.map((a) => {
         const data = new Float32Array(a.frequencyBinCount)
         a.getFloatFrequencyData(data)
-        return [750, 1500].map((hz) => {
+        return (listener === 0 ? [1000, 2000, 750, 1500] : [750, 1500, 1000, 2000]).map((hz) => {
           const bin = Math.round((hz * a.fftSize) / ctx.sampleRate)
           return Math.round(Math.max(-160, ...data.slice(bin - 1, bin + 2)))
         })
@@ -106,8 +106,8 @@ async function measureAudio(page) {
         codec: stats.get(audio?.codecId)?.mimeType,
         playing: !stream.paused && stream.currentTime > 0,
       }
-    })
-    const [[l, r], [l2, r2]] = last.levels
+    }, listener)
+    const [[l, r, ownL, ownR], [l2, r2, ownL2, ownR2]] = last.levels
     if (
       last.playing &&
       last.packets >= 20 &&
@@ -115,6 +115,7 @@ async function measureAudio(page) {
       last.codec?.toLowerCase() === 'audio/opus' &&
       l > -70 &&
       r2 > -70 &&
+      Math.min(l, r2) - Math.max(ownL, ownR, ownL2, ownR2) >= 40 &&
       l - r >= 12 &&
       r2 - l2 >= 12
     ) {
@@ -137,23 +138,24 @@ async function measureAudio(page) {
 }
 
 try {
-  browser = await engine.launch({
-    headless: true,
-    chromiumSandbox: true,
-    ...(withAudio && {
-      ignoreDefaultArgs: ['--mute-audio'],
-      env: { ...process.env, PULSE_PROP: 'whiterun.test=' + browserTag },
-    }),
-  })
   const pages = await Promise.all(
     cookies.map(async (value, i) => {
+      const browser = await engine.launch({
+        headless: true,
+        chromiumSandbox: true,
+        ...(withAudio && {
+          ignoreDefaultArgs: ['--mute-audio'],
+          env: { ...process.env, PULSE_PROP: 'whiterun.test=' + browserTag + '-' + i },
+        }),
+      })
+      browsers.push(browser)
       const ctx = await browser.newContext({ ignoreHTTPSErrors: true })
       await ctx.addCookies([
         { name: '__Host-wl-session', value, url: origin, secure: true, httpOnly: true, sameSite: 'Strict' },
       ])
       await ctx.addInitScript(
         ({ i, hosted, withAudio }) => {
-          localStorage.setItem('whiterun.gameAudio.enabled', withAudio && i === 0 ? 'on' : 'off')
+          localStorage.setItem('whiterun.gameAudio.enabled', withAudio ? 'on' : 'off')
           window.captureCount = 0
           window.testPeers = []
           const Peer = window.RTCPeerConnection
@@ -224,8 +226,9 @@ try {
   let audio
   if (withAudio) {
     stage = 'hosted Opus reception'
-    audio = await measureAudio(pages[1])
-    if ((await pages[0].locator('audio').count()) !== 0) throw Error('Local audio subscribed')
+    audio = await Promise.all(pages.map(measureAudio))
+    if ((await pages[0].locator('audio').count()) !== 1 || (await pages[1].locator('audio').count()) !== 1)
+      throw Error('Unexpected remote renderer count')
     console.log('audio-received')
     stage = 'revoke audio while screen remains active'
     await pages[0].getByRole('checkbox', { name: 'Share audio' }).uncheck()
@@ -233,7 +236,7 @@ try {
     await pages[1].getByRole('article', { name: 'Remote screen' }).waitFor()
     stage = 'reauthorize stereo audio'
     await pages[0].getByRole('checkbox', { name: 'Share audio' }).check()
-    await measureAudio(pages[1])
+    await measureAudio(pages[1], 1)
     console.log('audio-received')
   }
   stage = 'stop'
@@ -269,5 +272,5 @@ try {
   )
   process.exitCode = 1
 } finally {
-  await browser?.close()
+  await Promise.all(browsers.map((b) => b.close()))
 }

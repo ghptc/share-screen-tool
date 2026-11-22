@@ -28,7 +28,7 @@ type desktopSource struct {
 
 // Exercise the real launcher and helper, with the desktop bridge restricted to
 // one test-owned PipeWire stream. No unrelated desktop source can be started.
-func hostedDesktop(t *testing.T, ctx context.Context, mux *http.ServeMux, f *cfFixture, binaryPath, browserTag string) func(bool) int {
+func hostedDesktop(t *testing.T, ctx context.Context, mux *http.ServeMux, f *cfFixture, binaryPath, browserTag string, tones [2]float64) func(bool) int {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
@@ -64,7 +64,7 @@ func hostedDesktop(t *testing.T, ctx context.Context, mux *http.ServeMux, f *cfF
 		defer in.Close()
 		block := make([]byte, 960*4)
 		for i := range 960 {
-			for channel, frequency := range []float64{750, 1500} {
+			for channel, frequency := range tones {
 				sample := int16(320 * math.Sin(2*math.Pi*frequency*float64(i)/48000))
 				binary.LittleEndian.PutUint16(block[i*4+channel*2:], uint16(sample))
 			}
