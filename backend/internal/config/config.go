@@ -46,7 +46,9 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("%s must be a valid origin", v.name)
 		}
 	}
-	if os.Getenv("DISCORD_MODE") == "discord" && !strings.HasPrefix(c.WSURL, "wss://") {
+	if os.Getenv("WHITERUN_MEDIA_TRANSPORT") == "cloudflare-private" {
+		c.APIKey, c.APISecret = "", ""
+	} else if os.Getenv("DISCORD_MODE") == "discord" && !strings.HasPrefix(c.WSURL, "wss://") {
 		return Config{}, fmt.Errorf("Discord native media requires a TLS-protected LIVEKIT_WS_URL")
 	}
 	c.LocalPlayerKey = os.Getenv("LOCAL_PLAYER_KEY")

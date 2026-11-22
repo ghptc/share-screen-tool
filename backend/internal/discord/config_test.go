@@ -5,6 +5,29 @@ import (
 	"testing"
 )
 
+func TestPrivatePilotConfig(t *testing.T) {
+	t.Setenv("DISCORD_MODE", "discord")
+	t.Setenv("WHITERUN_ENV", "production")
+	t.Setenv("WHITERUN_MEDIA_TRANSPORT", "cloudflare-private")
+	t.Setenv("DISCORD_CLIENT_ID", "100000000000000001")
+	t.Setenv("DISCORD_CHANNELS", "12/34")
+	t.Setenv("DISCORD_VOICE_URL", "http://localhost:8091")
+	for i, key := range []string{"DISCORD_ROOM_KEY", "DISCORD_VOICE_KEY", "CLOUDFLARE_SFU_APP_SECRET", "DISCORD_CLIENT_SECRET"} {
+		t.Setenv(key, strings.Repeat(string(rune('a'+i)), 32))
+	}
+	for _, ids := range []string{"", "*", "100000000000000001,", "100000000000000001,anyone"} {
+		t.Setenv("DISCORD_PILOT_USERS", ids)
+		if _, err := Load("https://player.test", "", "", ""); err == nil {
+			t.Fatal("invalid private tester list accepted")
+		}
+	}
+	t.Setenv("DISCORD_PILOT_USERS", "100000000000000001")
+	c, err := Load("https://player.test", "", "", "")
+	if err != nil || c.Fixture || !c.PilotUsers["100000000000000001"] || c.AuthorizeURL != "https://discord.com/oauth2/authorize" {
+		t.Fatal("real private pilot unavailable")
+	}
+}
+
 func TestSimulatorCannotRunInProduction(t *testing.T) {
 	t.Setenv("DISCORD_MODE", "simulator")
 	t.Setenv("WHITERUN_ENV", "production")

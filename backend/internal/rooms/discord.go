@@ -92,7 +92,7 @@ func (a *API) RegisterDiscord(m *http.ServeMux, c *discord.Config) {
 }
 func (d *channelAccess) epoch(ctx context.Context, ref, user string) string {
 	ch, ok := d.c.Dir.Lookup(ref)
-	if !ok || d.c.Blocked[user] {
+	if !ok || d.c.Blocked[user] || (d.c.PilotUsers != nil && !d.c.PilotUsers[user]) {
 		return ""
 	}
 	body, _ := json.Marshal(map[string]string{"Guild": ch.Guild, "User": user})

@@ -90,6 +90,24 @@ func TestFixedRoomLifetime(t *testing.T) {
 	}
 }
 
+func TestPilotRequiresBothIdentityAndCurrentVoice(t *testing.T) {
+	f := newCFFixture(t, "https://player.test", &fakeMedia{})
+	f.cfg.PilotUsers = map[string]bool{"33": true}
+	other := f.login(t, "34")
+	if code, _ := f.post(t, other, "other", f.ref, "join", cfInput{}); code != 403 {
+		t.Fatal("correct channel alone admitted non-tester")
+	}
+	tester := f.login(t, "33")
+	code, joined := f.post(t, tester, "tab", f.ref, "join", cfInput{})
+	if code != 200 {
+		t.Fatal("tester in correct channel denied")
+	}
+	f.voice(t, "33", "23")
+	if code, _ = f.post(t, tester, joined["identity"].(string), f.ref, "state", cfInput{}); code != 403 {
+		t.Fatal("pilot retained authorization after leaving voice")
+	}
+}
+
 func TestRoomStateWaitRevocation(t *testing.T) {
 	f := newCFFixture(t, "https://player.test", &fakeMedia{})
 	cookie := f.login(t, "33")

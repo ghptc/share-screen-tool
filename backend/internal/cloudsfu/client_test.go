@@ -121,6 +121,26 @@ func TestPrototypeProfile(t *testing.T) {
 	}
 }
 
+func TestPrivatePilotProfile(t *testing.T) {
+	t.Setenv("WHITERUN_MEDIA_TRANSPORT", "cloudflare-private")
+	t.Setenv("DISCORD_MODE", "discord")
+	t.Setenv("WHITERUN_ENV", "production")
+	t.Setenv("DISCORD_PILOT_USERS", "")
+	if _, err := PrototypeEnabled("127.0.0.1:8080", false); err == nil {
+		t.Fatal("private pilot requires testers")
+	}
+	t.Setenv("DISCORD_PILOT_USERS", "100000000000000001")
+	if ok, err := PrototypeEnabled("127.0.0.1:8080", false); err != nil || !ok {
+		t.Fatal("private pilot refused")
+	}
+	if _, err := PrototypeEnabled("0.0.0.0:8080", false); err == nil {
+		t.Fatal("public listener accepted")
+	}
+	if _, err := PrototypeEnabled("127.0.0.1:8080", true); err == nil {
+		t.Fatal("fixture accepted")
+	}
+}
+
 func TestCloseRequiresTerminalProviderEvidence(t *testing.T) {
 	for _, tc := range []struct {
 		name, mid string

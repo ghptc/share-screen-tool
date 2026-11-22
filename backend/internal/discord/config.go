@@ -13,6 +13,7 @@ type Config struct {
 	VoiceURL, VoiceKey, AdmissionKey string
 	Fixture                          bool
 	Blocked                          map[string]bool
+	PilotUsers                       map[string]bool
 }
 
 // The simulator is restricted to an explicitly selected workstation profile.
@@ -31,7 +32,8 @@ func Load(origin, lkKey, lkSecret, playerKey string) (*Config, error) {
 	if (!mock && !PrivateProfile()) || (mock && (env != "development" || u.Scheme != "http" || u.Hostname() != "localhost")) {
 		return nil, errors.New("invalid Discord mode for this deployment")
 	}
-	if !mock && (u.Scheme != "https" || playerKey != "" || lkKey == "devkey" || len(lkSecret) < 32) {
+	pilot := os.Getenv("WHITERUN_MEDIA_TRANSPORT") == "cloudflare-private"
+	if !mock && (u.Scheme != "https" || playerKey != "" || (!pilot && (lkKey == "devkey" || len(lkSecret) < 32))) {
 		return nil, errors.New("Discord requires HTTPS, private LiveKit keys and the workstation gateway disabled")
 	}
 	dir, err := NewDirectory(os.Getenv("DISCORD_ROOM_KEY"), os.Getenv("DISCORD_CHANNELS"))
@@ -42,6 +44,19 @@ func Load(origin, lkKey, lkSecret, playerKey string) (*Config, error) {
 		OAuthConfig: OAuthConfig{Origin: origin, ClientID: os.Getenv("DISCORD_CLIENT_ID"), Secret: os.Getenv("DISCORD_CLIENT_SECRET"), AuthorizeURL: "https://discord.com/oauth2/authorize", TokenURL: "https://discord.com/api/v10/oauth2/token", UserURL: "https://discord.com/api/v10/users/@me"}}
 	for _, id := range strings.Split(os.Getenv("DISCORD_DENIED_USERS"), ",") {
 		c.Blocked[strings.TrimSpace(id)] = true
+	}
+	if pilot {
+		if mock || !PrivateProfile() {
+			return nil, errors.New("private Cloudflare pilot requires real Discord")
+		}
+		c.PilotUsers = make(map[string]bool)
+		for _, id := range strings.Split(os.Getenv("DISCORD_PILOT_USERS"), ",") {
+			id = strings.TrimSpace(id)
+			if len(id) < 17 || !snowflake.MatchString(id) {
+				return nil, errors.New("DISCORD_PILOT_USERS requires explicit Discord user IDs")
+			}
+			c.PilotUsers[id] = true
+		}
 	}
 	if mock {
 		// Public authorization step goes through the localhost browser origin.
@@ -57,8 +72,17 @@ func Load(origin, lkKey, lkSecret, playerKey string) (*Config, error) {
 		return nil, errors.New("invalid private voice service URL")
 	}
 	mappingKey := os.Getenv("DISCORD_ROOM_KEY")
-	if len(c.VoiceKey) < 32 || len(c.AdmissionKey) < 32 || !IndependentCredentials(lkSecret, c.Secret, c.VoiceKey, c.AdmissionKey, mappingKey) {
-		return nil, errors.New("use independent credentials for OAuth, LiveKit, room mapping, voice queries and SFU admission")
+	keys := []string{c.Secret, c.VoiceKey, mappingKey}
+	if pilot {
+		keys = append(keys, os.Getenv("CLOUDFLARE_SFU_APP_SECRET"))
+	} else {
+		if len(c.AdmissionKey) < 32 {
+			return nil, errors.New("DISCORD_ADMISSION_KEY requires at least 32 characters")
+		}
+		keys = append(keys, lkSecret, c.AdmissionKey)
+	}
+	if len(c.VoiceKey) < 32 || !IndependentCredentials(keys...) {
+		return nil, errors.New("use independent credentials for OAuth, media, room mapping and voice queries")
 	}
 	return c, nil
 }
