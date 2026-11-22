@@ -18,6 +18,7 @@ require (
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/bwmarrin/discordgo v0.29.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dennwc/iters v1.2.2 // indirect
 	github.com/frostbyte73/core v0.1.1 // indirect
@@ -26,6 +27,7 @@ require (
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/google/cel-go v0.29.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/gorilla/websocket v1.4.2 // indirect
 	github.com/jxskiss/base62 v1.1.0 // indirect
 	github.com/klauspost/compress v1.20.1 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
