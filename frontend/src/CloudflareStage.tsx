@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
-import { publish, subscribe, type Signal } from './cloudflarePeer'
+import { publish, ScreenIceGatheringTimeout, subscribe, type Signal } from './cloudflarePeer'
 import DesktopAudio from './DesktopAudio'
 import { readAudioPreference, writeAudioPreference } from './gameAudioSession'
 import { applyVideoTarget, nativeTarget, type VideoTarget } from './videoQuality'
@@ -304,12 +304,11 @@ export default function CloudflareStage({
       } catch (e) {
         if (flows.get(local) === flow) {
           remove(local)
-          if (active)
-            setMessage(
-              e instanceof DOMException && e.name === 'NotAllowedError'
-                ? 'Screen sharing was declined.'
-                : 'Screen sharing could not start.',
-            )
+          if (active) {
+            if (e instanceof ScreenIceGatheringTimeout) setMessage(e.message)
+            else if (e instanceof DOMException && e.name === 'NotAllowedError') setMessage('Screen sharing was declined.')
+            else setMessage('Screen sharing could not start.')
+          }
         }
       } finally {
         if (active) setBusy(false)

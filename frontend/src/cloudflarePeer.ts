@@ -4,7 +4,13 @@ export type Signal = (
   request: Record<string, unknown>,
 ) => Promise<{ handle: string; sdp: string }>
 
-async function localSDP(pc: RTCPeerConnection, description: RTCSessionDescriptionInit) {
+export class ScreenIceGatheringTimeout extends Error {}
+
+async function localSDP(
+  pc: RTCPeerConnection,
+  description: RTCSessionDescriptionInit,
+  timeoutError?: () => Error,
+) {
   await pc.setLocalDescription(description)
   if (pc.iceGatheringState !== 'complete') {
     await new Promise<void>((resolve, reject) => {
@@ -16,13 +22,58 @@ async function localSDP(pc: RTCPeerConnection, description: RTCSessionDescriptio
         pc.removeEventListener('icegatheringstatechange', finish)
         error ? reject(error) : resolve()
       }
-      const timer = setTimeout(() => done(new Error('ICE gathering timed out')), 8000)
+      const timer = setTimeout(() => {
+        done(timeoutError?.() ?? new Error('ICE gathering timed out'))
+      }, 8000)
       pc.addEventListener('icegatheringstatechange', finish)
       finish()
     })
   }
   return pc.localDescription!.sdp
 }
+
+async function screenOfferSDP(pc: RTCPeerConnection) {
+  const offer = await pc.createOffer()
+  const started = performance.now()
+  let completeEvent = false
+  let endOfCandidates = false
+  const onState = () => {
+    if (pc.iceGatheringState === 'complete') completeEvent = true
+  }
+  const onCandidate = (event: RTCPeerConnectionIceEvent) => {
+    if (event.candidate === null) endOfCandidates = true
+  }
+  function report() {
+    // Project the current offer onto a fixed vocabulary. Never log the peer, SDP or ICE events.
+    const types = new Set<string>()
+    for (const line of pc.localDescription?.sdp.split(/\r?\n/) ?? []) {
+      if (!line.startsWith('a=candidate:')) continue
+      const fields = line.split(/\s+/)
+      if (fields[6] === 'typ' && ['host', 'srflx', 'prflx', 'relay'].includes(fields[7]))
+        types.add(fields[7])
+    }
+    const state = pc.iceGatheringState
+    const stateLabel = ['new', 'gathering', 'complete'].includes(state) ? state : 'unknown'
+    const summary = `Gathering state: ${stateLabel}. Elapsed: ${Math.round(performance.now() - started)} ms. ` +
+      `Candidate types: ${[...types].join(', ') || 'none'}. ` +
+      `Complete event: ${completeEvent}. Null candidate event: ${endOfCandidates}.`
+    console.debug('Screen ICE. ' + summary)
+    return summary
+  }
+  pc.addEventListener('icegatheringstatechange', onState)
+  pc.addEventListener('icecandidate', onCandidate)
+  try {
+    const sdp = await localSDP(pc, offer, () => new ScreenIceGatheringTimeout(
+      'Screen sharing timed out waiting for ICE. ' + report(),
+    ))
+    report()
+    return sdp
+  } finally {
+    pc.removeEventListener('icegatheringstatechange', onState)
+    pc.removeEventListener('icecandidate', onCandidate)
+  }
+}
+
 export async function publish(
   pc: RTCPeerConnection,
   track: MediaStreamTrack,
@@ -33,7 +84,7 @@ export async function publish(
     direction: 'sendonly',
     ...(encoding && { sendEncodings: [encoding] }),
   })
-  const sdp = await localSDP(pc, await pc.createOffer())
+  const sdp = await screenOfferSDP(pc)
   const result = await send('publish', { mid: tx.mid, sdp })
   await pc.setRemoteDescription({ type: 'answer', sdp: result.sdp })
   return result.handle
