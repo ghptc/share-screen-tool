@@ -14,7 +14,8 @@ export async function fixtureAudio(context: BrowserContext, prefix: string) {
     let fixtures = new Set<string>()
     window.fetch = async (input, options) => {
       const path = new URL(input instanceof Request ? input.url : input.toString(), location.href).pathname
-      if (path === '/player/start' && !fixtures.has(JSON.parse(String(options?.body)).source)) {
+      const selection = path === '/player/start' ? JSON.parse(String(options?.body)) : null
+      if (selection && [selection.source, ...(selection.additional ?? [])].some(id => !fixtures.has(id))) {
         throw new Error('Test attempted to capture an unrelated application')
       }
       const response = await fetch(input, options)

@@ -9,15 +9,17 @@ export default function DesktopAudio({
   open,
   screen,
   control,
-  onStatus,
+  onStatus, onOffer,
 }: {
   open: boolean
   screen?: string
   control: string
   onStatus: (status: string) => void
+  onOffer: (offered:boolean) => void
 }) {
   const [previous] = useState(() => readAudioPreference(previousSourceKey))
-  const [pinned, setPinned] = useState('')
+  const [selected, setSelected] = useState<string[] | null>(null)
+  const initial = useRef<Set<string> | null>(null)
   const [catalog, setCatalog] = useState<{ screen: string; items: Source[] } | null>(null)
   const [unavailable, setUnavailable] = useState(false)
   const [capture, setCapture] = useState<{ screen: string; source: string; status: string } | null>(null)
@@ -30,10 +32,12 @@ export default function DesktopAudio({
   }, [])
   const authorized = pageActive ? screen : undefined
   const sources = catalog?.screen === authorized ? catalog?.items : undefined
-  const preferred = sources?.find((s) => s.id === (pinned || previous))
-  const target = preferred?.id || (!pinned && sources?.length === 1 ? sources[0].id : '')
+  const activeIDs = (selected ?? []).filter(id => sources?.some(s => s.id === id))
+  const target = activeIDs.join(',')
+  const offered = sources?.filter(s => !activeIDs.includes(s.id)) ?? []
+  const late = offered.some(s => initial.current && !initial.current.has(s.id))
   const phase = capture?.source === target && capture.screen === authorized ? capture.status : ''
-  const discover = open || phase !== 'Sharing audio'
+  useEffect(() => { onOffer(Boolean(authorized && late && !open)) }, [authorized, late, open, onOffer])
 
   useEffect(() => {
     if (!authorized) {
@@ -41,7 +45,7 @@ export default function DesktopAudio({
       setUnavailable(false)
       return
     }
-    if (!discover) return
+
     const request = new AbortController()
     let timer: number
     async function list() {
@@ -55,6 +59,12 @@ export default function DesktopAudio({
         // Older launchers expose bare serials which can be reused after a daemon restart.
         if (items.some((s) => !/^\d+:\d+$/.test(s.id))) throw new Error('Update desktop launcher')
         if (!request.signal.aborted) {
+          if (!initial.current) initial.current = new Set(items.map(s => s.id))
+          setSelected(current => {
+            if (current !== null) return current
+            const candidate = items.find(s => s.id === previous) ?? (items.length === 1 ? items[0] : undefined)
+            return candidate ? [candidate.id] : []
+          })
           setCatalog({ screen: authorized!, items })
           setUnavailable(false)
         }
@@ -72,7 +82,7 @@ export default function DesktopAudio({
       request.abort()
       window.clearTimeout(timer)
     }
-  }, [authorized, discover])
+  }, [authorized, previous])
 
   useEffect(() => {
     if (!authorized || !target) {
@@ -81,7 +91,7 @@ export default function DesktopAudio({
     }
     // Pin even an automatic choice for this screen. A replacement node jumps
     // to the chooser, including when it is the only remaining application.
-    setPinned(target)
+
     const controller = new AbortController()
     const stop = () => controller.abort()
     window.addEventListener('pagehide', stop)
@@ -93,7 +103,7 @@ export default function DesktopAudio({
         try {
           await publishGameAudio(authorized!, target, control, controller.signal, () => {
             failures = 0
-            writeAudioPreference(previousSourceKey, target)
+            writeAudioPreference(previousSourceKey, target.split(',')[0])
             setCapture({ screen: authorized!, source: target, status: 'Sharing audio' })
           })
         } catch {
@@ -133,9 +143,9 @@ export default function DesktopAudio({
       <div className="source-row">
         <select
           id="game-source"
-          value={target}
+          value={activeIDs[0] ?? ''}
           disabled={!sources?.length}
-          onChange={(e) => setPinned(e.target.value)}
+          onChange={(e) => setSelected([e.target.value])}
         >
           <option value="" disabled>
             {sources?.length ? 'Select application' : 'No available applications'}
@@ -147,6 +157,11 @@ export default function DesktopAudio({
           ))}
         </select>
       </div>
+      {activeIDs.length > 0 && <ul aria-label="Authorized applications">{activeIDs.map(id => {
+        const name = sourceLabel(sources!.find(s => s.id === id)!)
+        return <li key={id}>{name} <button aria-label={'Revoke '+name} onClick={() => setSelected(activeIDs.filter(active => active !== id))}>Revoke</button></li>
+      })}</ul>}
+      {offered.map(s => <button key={s.id} disabled={activeIDs.length >= 8} onClick={() => setSelected([...activeIDs, s.id])}>Allow audio · {sourceLabel(s)}</button>)}
       <p role="status">{status}</p>
     </div>
   )

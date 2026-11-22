@@ -82,6 +82,7 @@ export default function PlayerStage({
     document.addEventListener('pointerdown', outside)
     return () => { document.removeEventListener('keydown', escape); document.removeEventListener('pointerdown', outside) }
   }, [qualityOpen])
+  const [offer, setOffer] = useState(false)
   const [audioState, setAudioState] = useState('')
   const [audioEnabled, setAudioEnabled] = useState(
     () => readAudioPreference('whiterun.gameAudio.enabled') !== 'off',
@@ -233,6 +234,7 @@ export default function PlayerStage({
           <Icon name="audio" />
           {(sharing && audioEnabled && audioState) || 'Audio'}
         </button>
+        {offer && sharing && audioEnabled && !menu && <button onClick={() => { setQualityOpen(false);setMenu(true) }}>Allow audio</button>}
         <button ref={qualityButton} aria-expanded={qualityOpen} aria-controls="player-quality" onClick={() => { setMenu(false); setQualityOpen(v => !v) }}>Quality</button>
         {qualityOpen && <div id="player-quality" className="player-popover quality-menu" role="region" aria-label="Quality controls" ref={qualityPanel}>
           {canPublish && <>
@@ -272,6 +274,7 @@ export default function PlayerStage({
               control={control}
               screen={audioEnabled && connected && sharing ? screen : undefined}
               onStatus={reportAudio}
+              onOffer={setOffer}
             />
           )}
           {peers.map((p) => (
