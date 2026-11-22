@@ -3,7 +3,6 @@ package rooms
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"github.com/ghptc/whiterun-live/backend/internal/cloudsfu"
@@ -14,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -313,7 +313,13 @@ func TestCloudflareAudioIsBoundToScreenAndLease(t *testing.T) {
 }
 
 func TestCloudflareNativeOfferPermissions(t *testing.T) {
-	f := newCFFixture(t, "https://player.test", &fakeMedia{})
+	f := newCFFixture(t, "https://screen-share-player.gabrielhpittacosta.workers.dev", &fakeMedia{})
+	var elapsed atomic.Int64
+	start := time.Now()
+	f.a.now = func() time.Time { return start.Add(time.Duration(elapsed.Load())) }
+	// Only the in-process controller receives these requests. The helper has no cookie jar.
+	controller := httptest.NewServer(f.api)
+	t.Cleanup(controller.Close)
 	c := f.login(t, "33")
 	_, grant := f.post(t, c, "", f.ref, "join", cfInput{})
 	id := grant["identity"].(string)
@@ -326,23 +332,61 @@ func TestCloudflareNativeOfferPermissions(t *testing.T) {
 	_, pub := f.post(t, c, id, f.ref, "publish", cfInput{SDP: video, Mid: "0"})
 	handle := pub["handle"].(string)
 	f.post(t, c, id, f.ref, "ready", cfInput{Handle: handle})
-	lease := randomID(32)
-	s := &nativeSession{Owner: nativeOwner{Room: "dc-" + f.ref, Identity: id, Expires: time.Now().Add(time.Minute)}, ID: "helper", Screen: handle, LeaseHash: sha256.Sum256([]byte(lease)), Expires: time.Now().Add(time.Minute), Watching: true, Claimed: true}
-	f.a.nativeSessions[s.ID] = s
+	other := f.login(t, "34")
+	_, viewer := f.post(t, other, "viewer", f.ref, "join", cfInput{})
+	screen := map[string]string{"screen": handle}
+	if status, _ := call(t, controller.URL, "/native-audio/sessions", viewer["nativeAudioControl"].(string), screen); status != 403 {
+		t.Fatal("another admitted user paired the publisher's screen")
+	}
+	control := grant["nativeAudioControl"].(string)
+	pair := func() (string, map[string]string) {
+		t.Helper()
+		status, issued := call(t, controller.URL, "/native-audio/sessions", control, screen)
+		if status != 201 {
+			t.Fatalf("owner pairing returned %d", status)
+		}
+		return "/native-audio/" + issued["session"].(string), map[string]string{"code": issued["code"].(string)}
+	}
+	expiring, code := pair()
+	expiringWatch := openOwnerWatch(t, controller.URL+expiring+"/watch", control)
+	defer expiringWatch.Body.Close()
+	elapsed.Store(int64(time.Minute))
+	if status, _ := call(t, controller.URL, "/native-audio/claim", "", code); status != 403 {
+		t.Fatal("claim accepted at its one-minute deadline")
+	}
+	expiringWatch.Body.Close()
+
+	path, code := pair()
+	if status, _ := call(t, controller.URL, "/native-audio/claim", "", code); status != 403 {
+		t.Fatal("claim accepted before the owner watch")
+	}
+	watch := openOwnerWatch(t, controller.URL+path+"/watch", control)
+	defer watch.Body.Close()
+	status, credentials := call(t, controller.URL, "/native-audio/claim", "", code)
+	if status != 200 || credentials["transport"] != "cloudflare" || credentials["token"] != nil {
+		t.Fatal("valid claim did not return Cloudflare helper credentials")
+	}
+	if status, _ := call(t, controller.URL, "/native-audio/claim", "", code); status != 403 {
+		t.Fatal("one-time claim accepted twice")
+	}
+	lease := credentials["lease"].(string)
+	if status, _ := call(t, controller.URL, path+"/lease", lease, struct{}{}); status != 200 {
+		t.Fatal("cookie-free helper lease failed")
+	}
 	publish := func(credential, offer string) int {
-		body, _ := json.Marshal(cfInput{SDP: offer, Mid: "0"})
-		req := httptest.NewRequest("POST", "/native-audio/helper/publish", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+credential)
-		req.Header.Set("Content-Type", "application/json")
-		res := httptest.NewRecorder()
-		f.api.ServeHTTP(res, req)
-		return res.Code
+		status, _ := call(t, controller.URL, path+"/publish", credential, cfInput{SDP: offer, Mid: "0"})
+		return status
 	}
 	if publish("other", audio) != 403 || publish(lease, video) != 400 || publish(lease, strings.Replace(audio, "opus/48000/2", "PCMU/8000", 1)) != 400 || publish(lease, audio) != 200 {
 		t.Fatal("incorrect native offer restrictions")
 	}
 	f.voice(t, "33", "23")
-	if publish(lease, audio) != 403 || !s.Revoked {
+	if publish(lease, audio) != 403 {
 		t.Fatal("withdrawn voice membership authorized helper")
+	}
+	f.a.nativeMu.Lock()
+	defer f.a.nativeMu.Unlock()
+	if !f.a.nativeSessions[credentials["session"].(string)].Revoked {
+		t.Fatal("departure left the helper lease active")
 	}
 }

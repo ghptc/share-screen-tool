@@ -83,6 +83,23 @@ func TestApplicationTapGraphFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+func TestApplicationExitRequiresNewSelection(t *testing.T) {
+	graph := fixtureGraph(t)
+	tap := applicationTap{sourceSerial: 100, sourceID: 10, captureSerial: 200, captureID: 20}
+	if err := tap.verifyGraph(graph); err != nil {
+		t.Fatal(err)
+	}
+	// The capture node remains, but the authorized application has exited.
+	if err := tap.verifyGraph(graph[1:]); err == nil {
+		t.Fatal("capture survived removal of its source")
+	}
+	// A new game stream reuses the node ID and ports with a different serial.
+	graph[0].Info.Props["object.serial"] = float64(101)
+	if err := tap.verifyGraph(graph); err == nil {
+		t.Fatal("replacement application inherited authorization")
+	}
+}
 func TestStereoPortsRejectAmbiguousOrUnsupportedLayout(t *testing.T) {
 	g := fixtureGraph(t)
 	ports, err := stereoPorts(g, 10, "output")

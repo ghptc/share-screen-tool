@@ -2,8 +2,9 @@ import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare'
+import config from './wrangler.json' with { type: 'json' }
 
-const origin = 'https://pilot.example'
+const origin = config.vars.PLAYER_ORIGIN
 const ref = 'x'.repeat(32)
 const api = '/api/discord/'
 let mf, result, requests
@@ -72,6 +73,27 @@ test('same-origin admission passes the authenticated controller decision once', 
   assert.equal(requests[0].headers.get('X-Forwarded-User'), null)
   assert.equal((await get(path)).status, 405)
   assert.equal((await get(path, { ...options, headers: {Origin: 'https://another.example'} })).status, 403)
+  assert.equal(requests.length, 5)
+})
+
+test('native clients reach the controller on the player hostname with only the pairing or lease credential', async () => {
+  requests = []
+  const post = { method: 'POST', headers: { 'Content-Type': 'application/json' } }
+  result = () => Response.json({ transport: 'cloudflare' })
+  assert.equal((await get('/api/native-audio/claim', { ...post, body: '{"code":"fixture"}' })).status, 200)
+  assert.equal(requests[0].path, '/native-audio/claim')
+  assert.equal(requests[0].body, '{"code":"fixture"}')
+  result = () => new Response(null, { status: 403 })
+  for (const action of ['lease', 'publish', 'ready', 'stop']) {
+    const path = '/native-audio/fixture/' + action
+    assert.equal((await get('/api' + path, {
+      ...post, headers: { ...post.headers, Authorization: 'Bearer fixture' }, body: '{}',
+    })).status, 403)
+    assert.equal(requests.at(-1).path, path)
+    assert.equal(requests.at(-1).headers.get('Authorization'), 'Bearer fixture')
+  }
+  assert.ok(requests.every(request => !request.headers.has('Cookie') && !request.headers.has('Origin')))
+  for (const path of ['/player/sources', '/player/start']) assert.equal((await get(path, post)).status, 404)
   assert.equal(requests.length, 5)
 })
 
