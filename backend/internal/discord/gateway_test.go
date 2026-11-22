@@ -61,3 +61,15 @@ func TestFailClosedOnOfflineGapAndUnavailable(t *testing.T) {
 		t.Fatal("unavailable guild accepted")
 	}
 }
+
+func TestMalformedVoiceTransitionInvalidatesSnapshot(t *testing.T) {
+	var g Gateway
+	g.Observe(&dg.Event{Type: "READY", Sequence: 1})
+	g.Observe(&dg.Event{Sequence: 2, Struct: &dg.GuildCreate{Guild: &dg.Guild{ID: "11", Channels: []*dg.Channel{{ID: "22", Type: dg.ChannelTypeGuildVoice}}, VoiceStates: []*dg.VoiceState{{UserID: "33", ChannelID: "22"}}}}})
+	if g.Observe(&dg.Event{Type: "VOICE_STATE_UPDATE", Sequence: 3, RawData: []byte("null transition"), Struct: &dg.VoiceStateUpdate{}}) {
+		t.Fatal("malformed transition accepted")
+	}
+	if _, ok := g.Lookup("11", "33", time.Now()); ok {
+		t.Fatal("stale voice snapshot retained")
+	}
+}

@@ -43,18 +43,37 @@ func (g *Gateway) Observe(e *dg.Event) bool {
 		return false
 	}
 	g.seq = e.Sequence
+	// discordgo can dispatch a partially decoded event after a JSON error.
+	// A malformed membership transition invalidates the complete snapshot.
+	if e.RawData != nil {
+		switch e.Type {
+		case "GUILD_CREATE", "GUILD_DELETE", "CHANNEL_CREATE", "CHANNEL_UPDATE", "CHANNEL_DELETE", "VOICE_STATE_UPDATE":
+			if e.Struct == nil || json.Unmarshal(e.RawData, e.Struct) != nil {
+				g.ready = false
+				g.guilds = nil
+				return false
+			}
+		}
+	}
 	switch v := e.Struct.(type) {
 	case *dg.GuildCreate:
+		if v.Guild == nil || v.ID == "" {
+			g.ready = false
+			return false
+		}
 		delete(g.guilds, v.ID)
 		if v.Unavailable || v.VoiceStates == nil || v.Channels == nil {
 			return true
 		}
 		s := &guildState{map[string]bool{}, map[string]Presence{}}
 		for _, ch := range v.Channels {
+			if ch == nil || ch.ID == "" {
+				return true
+			}
 			s.channels[ch.ID] = ch.Type == dg.ChannelTypeGuildVoice
 		}
 		for _, p := range v.VoiceStates {
-			if p.UserID == "" || (p.GuildID != "" && p.GuildID != v.ID) {
+			if p == nil || p.UserID == "" || (p.GuildID != "" && p.GuildID != v.ID) {
 				return true
 			}
 			if _, duplicate := s.users[p.UserID]; duplicate {
@@ -64,20 +83,40 @@ func (g *Gateway) Observe(e *dg.Event) bool {
 		}
 		g.guilds[v.ID] = s
 	case *dg.GuildDelete:
+		if v.Guild == nil || v.ID == "" {
+			g.ready = false
+			return false
+		}
 		delete(g.guilds, v.ID)
 	case *dg.ChannelCreate:
+		if v.Channel == nil {
+			g.ready = false
+			return false
+		}
 		if s := g.guilds[v.GuildID]; s != nil {
 			s.channels[v.ID] = v.Type == dg.ChannelTypeGuildVoice
 		}
 	case *dg.ChannelUpdate:
+		if v.Channel == nil {
+			g.ready = false
+			return false
+		}
 		if s := g.guilds[v.GuildID]; s != nil {
 			s.channels[v.ID] = v.Type == dg.ChannelTypeGuildVoice
 		}
 	case *dg.ChannelDelete:
+		if v.Channel == nil {
+			g.ready = false
+			return false
+		}
 		if s := g.guilds[v.GuildID]; s != nil {
 			delete(s.channels, v.ID)
 		}
 	case *dg.VoiceStateUpdate:
+		if v.VoiceState == nil || v.UserID == "" || v.GuildID == "" {
+			g.ready = false
+			return false
+		}
 		if s := g.guilds[v.GuildID]; s != nil {
 			if v.ChannelID == "" {
 				delete(s.users, v.UserID)

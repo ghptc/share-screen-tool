@@ -29,12 +29,12 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	var gateway discord.Gateway
+	var current *discord.Gateway
 	var mu sync.RWMutex
 	var session *dg.Session
 	lookup := func(guild, user string) (discord.Presence, bool) {
 		mu.RLock()
-		s := session
+		s, gateway := session, current
 		mu.RUnlock()
 		if s == nil {
 			return discord.Presence{}, false
@@ -62,6 +62,7 @@ func main() {
 			log.Fatal("invalid bot configuration")
 		}
 		s.Identify.Intents = dg.IntentsGuilds | dg.IntentsGuildVoiceStates
+		gateway := new(discord.Gateway)
 		s.SyncEvents = true
 		s.ShouldReconnectOnError = false
 		s.StateEnabled = false
@@ -89,7 +90,7 @@ func main() {
 			}
 		})
 		mu.Lock()
-		session = s
+		session, current = s, gateway
 		mu.Unlock()
 		if err = s.Open(); err == nil {
 			app, err := s.User("@me")
