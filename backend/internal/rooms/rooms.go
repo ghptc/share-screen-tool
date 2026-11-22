@@ -35,6 +35,7 @@ type entry struct {
 	Joins       *rate.Limiter
 }
 type API struct {
+	prototype      *cfRegistry
 	discord        *channelAccess
 	cfg            Config
 	mu             sync.Mutex

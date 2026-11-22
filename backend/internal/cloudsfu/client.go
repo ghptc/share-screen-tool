@@ -54,6 +54,7 @@ type track struct {
 	Mid      string `json:"mid,omitempty"`
 	Error    string `json:"errorCode,omitempty"`
 	Status   string `json:"status,omitempty"`
+	Detail   string `json:"errorDescription,omitempty"`
 }
 type message struct {
 	ID          string       `json:"sessionId,omitempty"`
@@ -167,6 +168,9 @@ func (c *Client) Close(ctx context.Context, id, mid string) error {
 	}
 	if err != nil {
 		return err
+	}
+	if len(out.Tracks) == 1 && out.Tracks[0].Mid == mid && out.Tracks[0].Error == "close_track_error" && out.Tracks[0].Detail == "Track doesn't exist or was already closed" {
+		return nil
 	}
 	if len(out.Tracks) != 1 || out.Tracks[0].Mid != mid || out.Tracks[0].Error != "" {
 		return errResponse

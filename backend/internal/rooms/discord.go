@@ -44,14 +44,18 @@ func (a *API) RegisterDiscord(m *http.ServeMux, c *discord.Config) {
 	a.discord = d
 	d.oauth.Register(m)
 	m.Handle("POST /discord/{ref}/join", a.guard(http.HandlerFunc(a.discordJoin)))
-	m.Handle("POST /discord/{ref}/publish", a.guard(http.HandlerFunc(a.discordPublish)))
-	m.Handle("POST /discord/{ref}/stop", a.guard(http.HandlerFunc(a.discordPublish)))
-	m.HandleFunc("POST /internal/discord/admit", a.discordAdmit)
-	if !c.Fixture {
-		m.HandleFunc("GET /readyz", a.discordReady)
+	if a.prototype != nil {
+		m.Handle("POST /discord/{ref}/media/{action}", a.guard(http.HandlerFunc(a.cfSignal)))
+	} else {
+		m.Handle("POST /discord/{ref}/publish", a.guard(http.HandlerFunc(a.discordPublish)))
+		m.Handle("POST /discord/{ref}/stop", a.guard(http.HandlerFunc(a.discordPublish)))
+		m.HandleFunc("POST /internal/discord/admit", a.discordAdmit)
+		if !c.Fixture {
+			m.HandleFunc("GET /readyz", a.discordReady)
+		}
+		m.HandleFunc("GET /discord/signal/{identity}/rtc", a.discordSignal)
+		m.HandleFunc("GET /discord/signal/{identity}/rtc/{path...}", a.discordSignal)
 	}
-	m.HandleFunc("GET /discord/signal/{identity}/rtc", a.discordSignal)
-	m.HandleFunc("GET /discord/signal/{identity}/rtc/{path...}", a.discordSignal)
 	if c.Fixture {
 		// Forward only the OAuth authorization endpoint to the private fixture.
 		// The browser never selects a user or voice channel.
@@ -139,6 +143,10 @@ func (a *API) discordJoin(w http.ResponseWriter, r *http.Request) {
 	}
 	d.active[identity] = roomAccess{controlHash: sha256.Sum256([]byte(control)), session: s.ID, ref: ref, user: s.User, epoch: epoch, name: "Screen " + randomID(3), until: s.Until}
 	d.mu.Unlock()
+	if a.prototype != nil {
+		write(w, 200, map[string]string{"transport": "cloudflare-prototype", "identity": identity})
+		return
+	}
 	a.nativeMu.Lock()
 	a.nativeOwners[sha256.Sum256([]byte(control))] = nativeOwner{room, identity, s.Until}
 	a.nativeMu.Unlock()
@@ -246,6 +254,9 @@ func (a *API) validDiscord(ctx context.Context, room, id string) (roomAccess, bo
 		d.mu.Unlock()
 		if registered {
 			d.oauth.Revoke(b.session)
+			if a.prototype != nil {
+				return roomAccess{}, false
+			}
 			a.nativeMu.Lock()
 			delete(a.nativeOwners, b.controlHash)
 			var helpers []string
@@ -420,6 +431,11 @@ func (a *API) ReconcileDiscord(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			if a.prototype != nil {
+				c, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+				a.sweepCloudflare(c, true)
+				cancel()
+			}
 			return
 		case <-ticker.C:
 		}
@@ -476,6 +492,9 @@ func (a *API) ReconcileDiscord(ctx context.Context) {
 				}
 				d.updateMu.Unlock()
 			}
+		}
+		if a.prototype != nil {
+			a.sweepCloudflare(ctx, false)
 		}
 	}
 }
