@@ -4,7 +4,7 @@ The Worker serves the compiled player and sends allowed OAuth and signaling requ
 
 **Public release is blocked.** The two-hour proposal has been superseded by fixed 36,000-second admissions with manual re-entry. Voice departures are checked during signaling and reconciliation. A total controller/watchdog outage or a persistent SFU control API outage can leave live media flowing beyond the authorization deadline. The private pilot does not resolve that limitation. Complete real-guild and hosted-route acceptance before considering wider access. [Established-media measurements](cloudflare-sfu.md)
 
-For the running pilot, use the [Screen Share migration and rollback procedure](screen-share-migration.md). It stages the new Access-protected Worker, checks the replacement while Steve still serves the old link, and switches one controller and one bot during an approved handover.
+The running Screen Share hostname uses Discord admission without a Cloudflare Access login. The [original migration procedure](screen-share-migration.md) describes the earlier Access-protected handover. For a player-only update, use the versioned rollout below.
 
 ## 1. Build and check locally
 
@@ -44,15 +44,54 @@ The [deployment procedure](screen-share-migration.md#2-stage-the-new-worker-and-
 
 Use the deployed hostname for this check. A localhost client-authentication preflight and a mock Gateway run exercise different paths.
 
-To use the outcome-only Firefox recorder for the deployed site, supply its private `/live` link as `SCREEN_SHARE_TEST_ROOM_URL` and run `node frontend/smoke/private-guild.mjs` from the repository root. This uses the browser's normal HTTPS trust store. Complete Access in the new window. The recorder checks the callback, admission, departure and wrong-channel re-entry.
+To use the outcome-only Firefox recorder for the deployed site, supply its private `/live` link as `SCREEN_SHARE_TEST_ROOM_URL` and run `node frontend/smoke/private-guild.mjs` from the repository root. This uses the browser's normal HTTPS trust store. The recorder checks the callback, admission, departure and wrong-channel re-entry.
 
-1. Give a named tester in the configured voice channel the link from the real `/live` command. Complete Access and Discord OAuth. Expect a successful callback, a 200 room join and a connected player. With zero publishers the expected heading is **No active screens**.
-2. Copy the link into a separate profile. Confirm a signed-out visitor encounters Access and Discord authentication. With a signed-in pilot tester in the wrong channel, expect a 403 on the room join. A member outside the tester list also receives a denial.
+1. Give a named tester in the configured voice channel the link from the real `/live` command. Complete Discord OAuth. Expect a successful callback, a 200 room join and a connected player. With zero publishers the expected heading is **No active screens**.
+2. Copy the link into a separate profile. Confirm a signed-out visitor encounters Discord authentication. With a signed-in pilot tester in the wrong channel, expect a 403 on the room join. A member outside the tester list also receives a denial.
 3. Leave or switch voice channels with the admitted player open. Verify the player loses access and the old session cannot obtain state. Reopen the same link while outside the channel and verify denial again. Record the time and outcome only. Avoid HAR exports and OAuth callback URLs.
-4. For a separate video-only check, use two eligible testers, disable sharing audio, publish an approved screen and verify remote playback stops on departure. Keep hosted native pairing unapproved. The Cloudflare player still uses the workstation source bridge, which the Worker does not expose. Access also requires a browser identity on protected routes. The existing workstation audio implementation remains the reference.
+4. For a video-only check, use two eligible testers, disable sharing audio, publish an approved screen and verify remote video stops on departure.
+
+### Hosted application audio
+
+With **Share audio** enabled and the screen publication ready, the publisher can open **Audio → Pair native audio helper**. An explicit click creates a screen-bound session. The player reveals a single-use pairing code after its owner watch receives the first heartbeat. Use the installed Linux helper on the publishing workstation to list eligible applications and select the intended application's serial. Supply pairing JSON over standard input through a hidden prompt. Codes expire after one minute. The helper claims the code at the same HTTPS origin and renews a ten-second lease against the authorized Discord session and screen. Closing the Audio panel keeps the watch alive. Stopping the screen or disabling audio ends it.
+
+The helper requires neither browser cookies nor a Cloudflare Access credential. The workstation source and start endpoints remain private to the local player. Pairing and SFU readiness alone do not establish RTP delivery. Separate acceptance requires increasing sender and receiver audio packet counters for the same authorized publication with receiver playback disabled.
 
 The Worker incurs one dynamic request for a room page; matching JS and CSS are static asset requests. Idle room state waits up to 60 seconds and returns early on a change. A track-owning peer checks in at most 12 seconds apart under normal idle signaling to preserve the existing disconnect timeout. Per ten-hour visit, budget about **600** timed state requests without tracks or **3,000** with tracks, plus join, changes and other application traffic. Four continuously occupied tabs across successive visits imply 5,760 or 28,800 timed state requests/day respectively. The 100,000/day Free quota is shared with other dynamic requests. Failures back off to one attempt per minute. The Go monitor continues to reconcile locally. Workers and SFU egress have separate quotas. [Static asset billing](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/) · [Realtime pricing](https://developers.cloudflare.com/realtime/sfu/platform/pricing/)
 
-## Shut down or roll back
+## Player-only deployment and rollback
 
-Follow the [origin and edge rollback commands](screen-share-migration.md#rollback). Keep both Access protections, the existing tunnel, the production journal and Discord redirects through acceptance.
+Run these commands manually from the repository root in a single Bash session. Use the existing generated config with its private controller binding. Record the currently serving Worker version before uploading. This procedure assumes one version is serving all traffic.
+
+```bash
+set -euo pipefail
+cfg=deploy/worker/wrangler.screen-share.json
+wrangler=deploy/worker/node_modules/.bin/wrangler
+jq -e '.name == "screen-share-player" and
+  .vars.PLAYER_ORIGIN == "https://screen-share-player.gabrielhpittacosta.workers.dev" and
+  .assets.directory == "../../dist/screen-share-player" and
+  any(.vpc_services[]?; .binding == "CONTROLLER")' "$cfg" >/dev/null
+previous_version=$("$wrangler" deployments status --json --config "$cfg" |
+  jq -er 'select((.versions | length) == 1 and .versions[0].percentage == 100) | .versions[0].version_id | strings | select(length > 0)')
+printf 'Rollback Worker version: %s\n' "$previous_version"
+npm --prefix frontend run build:player
+"$wrangler" versions upload --dry-run --config "$cfg"
+```
+
+After approval, upload the version and enter the Worker version ID from Wrangler's output to promote it.
+
+```bash
+"$wrangler" versions upload --config "$cfg" --message "Hosted native audio pairing"
+read -rp 'Uploaded Worker version ID: ' new_version
+"$wrangler" versions deploy "${new_version}@100%" --config "$cfg"
+```
+
+To restore the recorded version, run the following command and reopen the room link to load its player assets. Existing tabs can retain their loaded JavaScript. [Cloudflare Worker rollbacks](https://developers.cloudflare.com/workers/versions-and-deployments/rollbacks/)
+
+```bash
+"$wrangler" rollback "$previous_version" --config "$cfg" --message "Restore previous player"
+```
+
+## Origin rollback
+
+For an origin handover, follow the [origin rollback procedure](screen-share-migration.md#rollback) for the intended target. Preserve the existing tunnel, ownership journal and Discord redirects.
