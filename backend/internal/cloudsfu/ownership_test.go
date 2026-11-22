@@ -72,7 +72,7 @@ func TestRecoverBeforeAdmission(t *testing.T) {
 	}
 }
 
-type crashSignal struct{ ID, Mid, SDP string }
+type crashSignal struct{ ID, Mid, SDP, Publisher string }
 
 func TestSFUControllerProcess(t *testing.T) {
 	if os.Getenv("WHITERUN_TEST_CONTROLLER") != "1" {
@@ -95,7 +95,11 @@ func TestSFUControllerProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.SDP, err = g.Publish(t.Context(), s.ID, "generated", s.Mid, s.SDP)
+	if s.Publisher == "" {
+		s.SDP, err = g.Publish(t.Context(), s.ID, "generated", s.Mid, s.SDP)
+	} else {
+		s.Mid, s.SDP, err = g.Subscribe(t.Context(), s.ID, s.Publisher, "generated")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +123,12 @@ func TestHostedControllerCrash(t *testing.T) {
 	if os.Getenv("WHITERUN_SFU_MEDIA_TEST") != "cloudflare" {
 		t.Skip("hosted SFU opt-in")
 	}
+	for _, role := range []string{"publisher", "subscriber"} {
+		t.Run(role, func(t *testing.T) { checkControllerCrash(t, role) })
+	}
+}
+
+func checkControllerCrash(t *testing.T, role string) {
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Second)
 	defer cancel()
 	c, err := FromEnvironment()
@@ -162,12 +172,29 @@ func TestHostedControllerCrash(t *testing.T) {
 			proc.Wait()
 		}
 	}()
-	if err = json.NewEncoder(in).Encode(crashSignal{Mid: tx.Mid(), SDP: offer}); err != nil {
-		t.Fatal(err)
+	var owned crashSignal
+	allocate := func(request crashSignal) crashSignal {
+		t.Helper()
+		if e := json.NewEncoder(in).Encode(request); e != nil {
+			t.Fatal("sending test signal failed")
+		}
+		if json.NewDecoder(out).Decode(&owned) != nil {
+			t.Fatal("protected allocation failed")
+		}
+		return owned
 	}
-	var s crashSignal
-	if json.NewDecoder(out).Decode(&s) != nil {
-		t.Fatal("protected allocation failed")
+	s := crashSignal{Mid: tx.Mid(), SDP: offer}
+	if role == "publisher" {
+		s = allocate(s)
+	} else {
+		s.ID, err = c.NewSession(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.SDP, err = c.Publish(ctx, s.ID, "generated", s.Mid, s.SDP)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	defer c.Close(context.Background(), s.ID, s.Mid)
 	if pub.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: s.SDP}) != nil {
@@ -205,15 +232,21 @@ func TestHostedControllerCrash(t *testing.T) {
 			packets.Add(1)
 		}
 	})
-	id, err := c.NewSession(ctx)
-	if err != nil {
-		t.Fatal(err)
+	var id, mid, remote string
+	if role == "subscriber" {
+		rx := allocate(crashSignal{Publisher: s.ID})
+		id, mid, remote = rx.ID, rx.Mid, rx.SDP
+	} else {
+		id, err = c.NewSession(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mid, remote, err = c.Subscribe(ctx, id, s.ID, "generated")
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	mid, remote, err := c.Subscribe(ctx, id, s.ID, "generated")
 	defer c.Close(context.Background(), id, mid)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if sub.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: remote}) != nil {
 		t.Fatal("receive offer failed")
 	}
@@ -231,12 +264,12 @@ func TestHostedControllerCrash(t *testing.T) {
 	}
 	proc.Wait()
 	wait(func() bool {
-		_, e := os.Stat(filepath.Join(dir, os.Getenv("CLOUDFLARE_SFU_APP_ID"), s.ID+".track"))
+		_, e := os.Stat(filepath.Join(dir, os.Getenv("CLOUDFLARE_SFU_APP_ID"), owned.ID+".track"))
 		return os.IsNotExist(e)
 	})
-	state, err := c.call(ctx, "GET", "/"+s.ID, nil)
+	state, err := c.call(ctx, "GET", "/"+owned.ID, nil)
 	if err != errSessionGone && (err != nil || len(state.Tracks) != 1 || state.Tracks[0].Status != "inactive") {
-		t.Fatal("provider did not confirm inactive publication")
+		t.Fatal("provider did not confirm inactive track")
 	}
 	elapsed := time.Since(start)
 	time.Sleep(400 * time.Millisecond)
