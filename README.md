@@ -148,3 +148,5 @@ Milestone 4.1: [audio behavior, Linux limitations, and native-helper proposal](d
 The [foreground helper CLI](docs/native-audio.md) remains available for invitation rooms and audio diagnostics. The local player starts capture directly from its Audio menu. [Same-headset measurements](docs/same-headset-render-results.json)
 
 The native helper now encodes exact 20 ms libopus frames with live pacing. See [audio quality stabilization and sustained timing evidence](docs/audio-quality-stabilization.md).
+
+For a manual release to the existing Ubuntu EC2 host, use the [rsync, Compose and rollback guide](docs/ec2.md).
