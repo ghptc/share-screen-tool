@@ -276,6 +276,8 @@ func (a *API) discordPublish(w http.ResponseWriter, r *http.Request) {
 	a.nativeMu.Lock()
 	owner := a.nativeOwners[bearerHash(r)]
 	a.nativeMu.Unlock()
+	d.updateMu.Lock()
+	defer d.updateMu.Unlock()
 	b, ok := a.validDiscord(r.Context(), owner.Room, owner.Identity)
 	if !ok || s.ID != b.session || b.ref != r.PathValue("ref") {
 		fail(w, 403, "Voice authorization ended")
@@ -291,8 +293,11 @@ func (a *API) discordPublish(w http.ResponseWriter, r *http.Request) {
 	if publish {
 		permission.CanPublishSources = []livekit.TrackSource{livekit.TrackSource_SCREEN_SHARE}
 	}
-	d.updateMu.Lock()
-	defer d.updateMu.Unlock()
+	if publish && b.publishing {
+		// Retries of an existing upgrade cannot extend its unused reservation.
+		write(w, 200, map[string]bool{"publishing": true})
+		return
+	}
 	if publish {
 		participants, err := a.client.ListParticipants(ctx, &livekit.ListParticipantsRequest{Room: owner.Room})
 		if err != nil {

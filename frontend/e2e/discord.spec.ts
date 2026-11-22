@@ -297,12 +297,15 @@ test('protected room serializes explicit publisher upgrades and clears abandoned
     // these simultaneous requests exercise room capacity.
     await new Promise((resolve) => setTimeout(resolve, 4000))
     const statuses = await Promise.all([0, 1, 2, 3, 4].map(upgrade))
-    expect(statuses.sort()).toEqual([200, 200, 200, 200, 409])
+    expect([...statuses].sort()).toEqual([200, 200, 200, 200, 409])
     const five = await Promise.all(Array.from({ length: 5 }, () => upgrade(5)))
     expect(five).toEqual([409, 409, 409, 409, 409])
-    // None of the reservations above published media. Reconciliation must
-    // demote those participants and free a slot while they remain connected.
-    await expect.poll(() => upgrade(5), { timeout: 32000, intervals: [1500] }).toBe(200)
+    // A repeated upgrade is idempotent. The original vacant reservations
+    // still expire at 20 seconds, even though all four callers retried.
+    await new Promise((resolve) => setTimeout(resolve, 12000))
+    const reserved = statuses.flatMap((status, index) => (status === 200 ? [index] : []))
+    expect(await Promise.all(reserved.map(upgrade))).toEqual([200, 200, 200, 200])
+    await expect.poll(() => upgrade(5), { timeout: 17000, intervals: [1000] }).toBe(200)
     await gateway(false)
     await expect(watchers[0].page.getByRole('alert')).toContainText('Discord voice channel')
     await gateway(true)
