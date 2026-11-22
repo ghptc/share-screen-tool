@@ -9,13 +9,14 @@ import (
 )
 
 type Config struct {
-	Addr       string
-	LiveKitURL string
-	APIKey     string
-	APISecret  string
-	AdminKey   string
-	WSURL      string
-	AppOrigin  string
+	Addr           string
+	LiveKitURL     string
+	APIKey         string
+	APISecret      string
+	AdminKey       string
+	LocalPlayerKey string
+	WSURL          string
+	AppOrigin      string
 }
 
 func Load() (Config, error) {
@@ -43,6 +44,13 @@ func Load() (Config, error) {
 		schemeOK := err == nil && ((v.websocket && (u.Scheme == "ws" || u.Scheme == "wss")) || (!v.websocket && (u.Scheme == "http" || u.Scheme == "https")))
 		if !schemeOK || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 			return Config{}, fmt.Errorf("%s must be a valid origin", v.name)
+		}
+	}
+	c.LocalPlayerKey = os.Getenv("LOCAL_PLAYER_KEY")
+	if c.LocalPlayerKey != "" {
+		origin, _ := url.Parse(c.AppOrigin)
+		if len(c.LocalPlayerKey) < 32 || strings.TrimSpace(c.LocalPlayerKey) != c.LocalPlayerKey || c.LocalPlayerKey == c.AdminKey || origin.Scheme != "http" || origin.Hostname() != "localhost" {
+			return Config{}, fmt.Errorf("local player requires a separate 32-character key and an http://localhost origin")
 		}
 	}
 	return c, nil

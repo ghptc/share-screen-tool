@@ -19,6 +19,7 @@ services:
       LIVEKIT_HTTP_URL: "http://livekit:7880"
       LIVEKIT_API_KEY: "devkey"
       LIVEKIT_API_SECRET: "secret"
+      LOCAL_PLAYER_KEY: "${LOCAL_PLAYER_KEY:-}"
       LOCAL_ADMIN_KEY: "${LOCAL_ADMIN_KEY:?Set LOCAL_ADMIN_KEY in .env to a random key of at least 32 characters}"
       LIVEKIT_WS_URL: "ws://127.0.0.1:7880"
       APP_ORIGIN: "${APP_ORIGIN:-http://localhost:5173}"
@@ -40,8 +41,17 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
+      args:
+        PLAYER_UID: "${PLAYER_UID:-1000}"
+        PLAYER_GID: "${PLAYER_GID:-1000}"
     environment:
       API_PROXY_TARGET: "http://backend:8080"
+      LOCAL_PLAYER_KEY: "${LOCAL_PLAYER_KEY:-}"
+      APP_ORIGIN: "${APP_ORIGIN:-http://localhost:5173}"
+      PLAYER_AUDIO_SOCKET: "/desktop/launcher.sock"
+      PLAYER_COMPOSE_LOOPBACK: "1"
+    volumes:
+      - ./.local-player/socket:/desktop:ro
     ports:
       - "127.0.0.1:${FRONTEND_PORT:-5173}:5173"
     depends_on:

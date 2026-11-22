@@ -8,3 +8,12 @@ backend/bin/
 *.log
 test-results/
 playwright-report/
+
+# Locally built native helper
+/native-audio/whiterun-audio
+
+/.local-player/
+
+# Locally generated validation output
+__pycache__/
+/docs/*-results*.json

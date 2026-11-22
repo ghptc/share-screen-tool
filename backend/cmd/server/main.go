@@ -36,7 +36,7 @@ func main() {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/", httpapi.New(cfg.LiveKitURL))
-	rooms.New(rooms.Config{APIKey: cfg.APIKey, APISecret: cfg.APISecret, AdminKey: cfg.AdminKey, HTTPURL: cfg.LiveKitURL, WSURL: cfg.WSURL, AppOrigin: cfg.AppOrigin}).Register(mux)
+	rooms.New(rooms.Config{APIKey: cfg.APIKey, APISecret: cfg.APISecret, AdminKey: cfg.AdminKey, LocalPlayerKey: cfg.LocalPlayerKey, HTTPURL: cfg.LiveKitURL, WSURL: cfg.WSURL, AppOrigin: cfg.AppOrigin}).Register(mux)
 	server := &http.Server{Addr: cfg.Addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

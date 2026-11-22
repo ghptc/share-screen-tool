@@ -51,3 +51,24 @@ func TestRoomConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestPlayerOnlyOnConfiguredWorkstation(t *testing.T) {
+	const admin = "a-local-operator-key-of-at-least-32-characters"
+	const player = "another-local-player-key-of-at-least-32-characters"
+	t.Setenv("LOCAL_ADMIN_KEY", admin)
+	for _, tc := range []struct {
+		key, origin string
+		allowed     bool
+	}{
+		{"", "https://rooms.example", true}, {player, "http://localhost:5173", true},
+		{admin, "http://localhost:5173", false}, {"short", "http://localhost:5173", false},
+		{player, "https://rooms.example", false}, {player, "http://localhost.example", false},
+	} {
+		t.Setenv("LOCAL_PLAYER_KEY", tc.key)
+		t.Setenv("APP_ORIGIN", tc.origin)
+		_, err := Load()
+		if (err == nil) != tc.allowed {
+			t.Errorf("unexpected player activation at %s", tc.origin)
+		}
+	}
+}

@@ -26,7 +26,7 @@ const TokenTTL = 5 * time.Minute
 const InviteTTL = 8 * time.Hour
 const maxRooms = 100
 
-type Config struct{ APIKey, APISecret, AdminKey, HTTPURL, WSURL, AppOrigin string }
+type Config struct{ APIKey, APISecret, AdminKey, LocalPlayerKey, HTTPURL, WSURL, AppOrigin string }
 type entry struct {
 	ID, Title   string
 	InviteHash  [32]byte
@@ -35,19 +35,26 @@ type entry struct {
 	Joins       *rate.Limiter
 }
 type API struct {
-	cfg      Config
-	mu       sync.Mutex
-	rooms    map[string]entry
-	client   livekit.RoomService
-	now      func() time.Time
-	requests *rate.Limiter
+	cfg            Config
+	mu             sync.Mutex
+	rooms          map[string]entry
+	client         livekit.RoomService
+	now            func() time.Time
+	requests       *rate.Limiter
+	nativeMu       sync.Mutex
+	nativeOwners   map[[32]byte]nativeOwner
+	nativeSessions map[string]*nativeSession
 }
 
 func New(cfg Config) *API {
-	return &API{cfg: cfg, rooms: make(map[string]entry), client: livekit.NewRoomServiceProtobufClient(cfg.HTTPURL, &http.Client{Timeout: 5 * time.Second}), now: time.Now, requests: rate.NewLimiter(rate.Limit(5), 20)}
+	return &API{cfg: cfg, rooms: make(map[string]entry), nativeOwners: make(map[[32]byte]nativeOwner), nativeSessions: make(map[string]*nativeSession), client: livekit.NewRoomServiceProtobufClient(cfg.HTTPURL, &http.Client{Timeout: 5 * time.Second}), now: time.Now, requests: rate.NewLimiter(rate.Limit(5), 20)}
 }
 
 func (a *API) Register(mux *http.ServeMux) {
+	a.registerNative(mux)
+	if len(a.cfg.LocalPlayerKey) >= 32 {
+		mux.Handle("POST /local/join", a.guard(http.HandlerFunc(a.localJoin)))
+	}
 	mux.Handle("POST /rooms", a.guard(http.HandlerFunc(a.create)))
 	mux.Handle("POST /rooms/{id}/join", a.guard(http.HandlerFunc(a.join)))
 }
@@ -162,23 +169,63 @@ func (a *API) join(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "Display name must contain 1–64 characters without control characters")
 		return
 	}
+	a.issueJoin(w, room, input.DisplayName, canPublish)
+}
+
+const localRoom = "whiterun-local"
+
+// Only the loopback development frontend has this dedicated credential.
+// The caller cannot choose a room, identity, lifetime or grants.
+func (a *API) localJoin(w http.ResponseWriter, r *http.Request) {
+	expected := sha256.Sum256([]byte(a.cfg.LocalPlayerKey))
+	supplied := bearerHash(r)
+	if len(a.cfg.LocalPlayerKey) < 32 || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || subtle.ConstantTimeCompare(supplied[:], expected[:]) != 1 {
+		fail(w, 403, "Local player session required")
+		return
+	}
+	var input struct{}
+	if !decode(w, r, &input) {
+		return
+	}
+	room := entry{ID: localRoom, Title: "Local room", Expires: a.now().Add(InviteTTL)}
+	a.issueJoin(w, room, "Screen "+randomID(3), true)
+}
+
+func (a *API) issueJoin(w http.ResponseWriter, room entry, displayName string, canPublish bool) {
 	identity := "participant-" + randomID(18)
 	grant := &auth.VideoGrant{RoomJoin: true, Room: room.ID}
 	grant.SetCanPublish(canPublish)
 	if canPublish {
-		grant.SetCanPublishSources([]livekit.TrackSource{livekit.TrackSource_SCREEN_SHARE})
+		grant.SetCanPublishSources([]livekit.TrackSource{livekit.TrackSource_SCREEN_SHARE, livekit.TrackSource_SCREEN_SHARE_AUDIO})
 	}
 	grant.SetCanPublishData(false)
 	grant.SetCanSubscribe(true)
 	grant.SetCanUpdateOwnMetadata(false)
 	grant.SetCanSubscribeMetrics(false)
 	grant.SetCanManageAgentSession(false)
-	token, err := auth.NewAccessToken(a.cfg.APIKey, a.cfg.APISecret).SetIdentity(identity).SetName(input.DisplayName).SetValidFor(TokenTTL).SetVideoGrant(grant).ToJWT()
+	token, err := auth.NewAccessToken(a.cfg.APIKey, a.cfg.APISecret).SetIdentity(identity).SetName(displayName).SetValidFor(TokenTTL).SetVideoGrant(grant).ToJWT()
 	if err != nil {
 		fail(w, 500, "Could not authorize participant")
 		return
 	}
-	write(w, 200, map[string]any{"token": token, "serverUrl": a.cfg.WSURL, "identity": identity, "displayName": input.DisplayName, "roomId": room.ID, "title": room.Title, "tokenExpiresAt": a.now().Add(TokenTTL), "canPublish": canPublish})
+	control := ""
+	if canPublish {
+		control = randomID(32)
+		a.nativeMu.Lock()
+		for key, owner := range a.nativeOwners {
+			if !a.now().Before(owner.Expires) {
+				delete(a.nativeOwners, key)
+			}
+		}
+		if len(a.nativeOwners) >= maxRooms*64 {
+			a.nativeMu.Unlock()
+			fail(w, 429, "Local publisher session limit reached")
+			return
+		}
+		a.nativeOwners[sha256.Sum256([]byte(control))] = nativeOwner{Room: room.ID, Identity: identity, Expires: room.Expires}
+		a.nativeMu.Unlock()
+	}
+	write(w, 200, map[string]any{"nativeAudioControl": control, "token": token, "serverUrl": a.cfg.WSURL, "identity": identity, "displayName": displayName, "roomId": room.ID, "title": room.Title, "tokenExpiresAt": a.now().Add(TokenTTL), "canPublish": canPublish})
 }
 
 func randomID(bytes int) string {

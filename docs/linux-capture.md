@@ -30,7 +30,7 @@ Compare H.264, VP9, and AV1 using actual browser capabilities, negotiated codec 
 
 Use measured capture settings and WebRTC reports to distinguish requested 2560×1440/60 from actual capture, outbound encoding, and inbound rendering. Calculate bitrate and packet-loss rates from report deltas, identify codec through the relevant codec report, and label missing fields as unavailable. RTT is not glass-to-glass latency; validate end-to-end delay separately. Adaptive subscription/dynacast and sustainable quality selection are future work, with stability taking priority over target quality.
 
-Generated-video transport through the local SFU has been validated in Chromium. Desktop capture, audio, GPU encoding, latency, and 1440p60 have not been validated. No native PipeWire agent or audio routing workaround is implemented.
+The user subsequently reported real desktop video capture and playback in two Chrome sessions. Milestone 4.1 adds optional browser-returned screen audio and validates generated Opus transport in Chromium and Firefox; actual desktop audio, GPU encoding, latency, and 1440p60 remain unvalidated. No native PipeWire agent or audio routing workaround is implemented. See [audio findings and the manual capture procedure](system-audio.md).
 
 ## Milestone 3 browser findings
 

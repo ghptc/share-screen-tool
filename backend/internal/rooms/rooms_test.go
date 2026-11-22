@@ -347,7 +347,7 @@ func TestScreenPublisherCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := claims.Video
-	if !g.GetCanPublish() || len(g.CanPublishSources) != 1 || g.CanPublishSources[0] != "screen_share" || g.GetCanPublishData() || g.GetCanUpdateOwnMetadata() || g.Room != room["id"] || g.RoomCreate || g.RoomAdmin || registered.ExpiresAt.Time.Sub(registered.IssuedAt.Time) != TokenTTL {
+	if !g.GetCanPublish() || len(g.CanPublishSources) != 2 || g.CanPublishSources[0] != "screen_share" || g.CanPublishSources[1] != "screen_share_audio" || g.GetCanPublishData() || g.GetCanUpdateOwnMetadata() || g.Room != room["id"] || g.RoomCreate || g.RoomAdmin || registered.ExpiresAt.Time.Sub(registered.IssuedAt.Time) != TokenTTL {
 		t.Fatal("publisher grant exceeds screen-only room permission")
 	}
 	if _, ok := result["publishKey"]; ok {
@@ -356,5 +356,41 @@ func TestScreenPublisherCapability(t *testing.T) {
 	code, viewer := call(t, url, path, "", map[string]string{"invite": room["invite"].(string), "displayName": "Viewer"})
 	if code != 200 || viewer["canPublish"] != false {
 		t.Fatal("viewer invitation gained publishing permission")
+	}
+}
+
+func TestLocalPlayerScope(t *testing.T) {
+	const key = "separate-workstation-player-credential"
+	a := New(Config{APIKey: "devkey", APISecret: "secret", AdminKey: testAdmin, LocalPlayerKey: key, WSURL: "ws://127.0.0.1:7880", AppOrigin: "http://localhost:5173"})
+	mux := http.NewServeMux()
+	a.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	for _, credential := range []string{"", testAdmin} {
+		if code, _ := call(t, server.URL, "/local/join", credential, struct{}{}); code != 403 {
+			t.Fatalf("local join accepted invalid credential: %d", code)
+		}
+	}
+	if code, _ := call(t, server.URL, "/rooms", key, map[string]string{"title": "example"}); code != 401 {
+		t.Fatal("player credential allowed room administration")
+	}
+	if code, _ := call(t, server.URL, "/local/join", key, map[string]string{"room": "elsewhere"}); code != 400 {
+		t.Fatal("caller could choose the room")
+	}
+	code, res := call(t, server.URL, "/local/join", key, struct{}{})
+	if code != 200 {
+		t.Fatalf("join failed: %d", code)
+	}
+	token, err := auth.ParseAPIToken(res["token"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, claims, err := token.Verify("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := claims.Video
+	if g == nil || g.Room != localRoom || !g.RoomJoin || !g.GetCanSubscribe() || !g.GetCanPublish() || g.GetCanPublishData() || g.RoomAdmin || g.RoomCreate || g.RoomList || len(g.CanPublishSources) != 2 || g.CanPublishSources[0] != "screen_share" || g.CanPublishSources[1] != "screen_share_audio" || registered.ExpiresAt.Time.Sub(registered.IssuedAt.Time) != TokenTTL {
+		t.Fatal("player grant exceeds the short-lived, room-scoped screen-sharing permissions")
 	}
 }

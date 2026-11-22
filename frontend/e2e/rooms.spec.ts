@@ -16,7 +16,7 @@ test('two independent sessions: authorized joins, presence, departure, and rejoi
     const pageErrors: string[] = []
     alice.on('pageerror', e => pageErrors.push(e.message))
     bob.on('pageerror', e => pageErrors.push(e.message))
-    await alice.goto(baseURL!)
+    await alice.goto(new URL('/rooms', baseURL!).href)
     await alice.getByLabel('Display name').fill('Alice browser')
     await alice.getByLabel('Room title', { exact: true }).fill('Browser validation room')
     await alice.getByLabel('Local operator key').fill(operatorKey())
@@ -67,12 +67,12 @@ test('an invalid invitation is rejected in the browser', async ({ page, baseURL 
 
 test('real signaling interruption reconnects automatically', async ({ page, baseURL }) => {
   const sockets: { client: WebSocketRoute; server: WebSocketRoute }[] = []
-  await page.routeWebSocket('ws://127.0.0.1:7880/**', async client => {
+  await page.routeWebSocket('ws://127.0.0.1:*/**', async client => {
     if (sockets.length > 0) await new Promise(resolve => setTimeout(resolve, 800))
     sockets.push({ client, server: client.connectToServer() })
   })
   try {
-    await page.goto(baseURL!)
+    await page.goto(new URL('/rooms', baseURL!).href)
     await page.getByLabel('Display name').fill('Reconnect guest')
     await page.getByLabel('Room title', { exact: true }).fill('Reconnect validation room')
     await page.getByLabel('Local operator key').fill(operatorKey())

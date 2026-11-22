@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+umask 077
+mkdir -p .local-player/socket
+chmod 700 .local-player .local-player/socket
+# Keep workstation credentials out of the browser, command line and build context.
+python3 - <<'PY'
+from pathlib import Path
+import fcntl, os, re, secrets
+with Path('.env').open('a+') as env:
+    fcntl.flock(env, fcntl.LOCK_EX)
+    os.fchmod(env.fileno(), 0o600)
+    env.seek(0)
+    original = env.read()
+    config = original or Path('.env.example').read_text()
+    for key in ('LOCAL_ADMIN_KEY', 'LOCAL_PLAYER_KEY'):
+        match = re.search(r'^' + key + r'=(.*)$', config, re.M)
+        if match and match[1].strip():
+            continue
+        line = key + '=' + secrets.token_hex(32)
+        config = config[:match.start()] + line + config[match.end():] if match else config.rstrip() + '\n' + line + '\n'
+    if config != original:
+        env.seek(0)
+        env.truncate()
+        env.write(config)
+PY
+PLAYER_UID="$(id -u)"
+PLAYER_GID="$(id -g)"
+export PLAYER_UID PLAYER_GID
+(cd native-audio && go build -o whiterun-audio .)
+player_origin="$(docker compose config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["frontend"]["environment"]["APP_ORIGIN"])')"
+if ! systemctl --user is-active --quiet whiterun-live-launcher.socket; then
+  systemd-run --user --unit=whiterun-live-launcher --collect \
+    --socket-property="ListenStream=$PWD/.local-player/socket/launcher.sock" \
+    --socket-property=SocketMode=0600 --socket-property=RemoveOnStop=yes \
+    --property=NoNewPrivileges=yes --property=Restart=on-failure \
+    "$PWD/native-audio/whiterun-audio" --desktop-launcher --player-origin "$player_origin"
+else
+  launcher_pid="$(systemctl --user show whiterun-live-launcher.service --property=MainPID --value)"
+  if [[ "$launcher_pid" =~ ^[1-9][0-9]*$ ]] && ! cmp -s "/proc/$launcher_pid/exe" native-audio/whiterun-audio; then
+    systemctl --user restart whiterun-live-launcher.service
+  fi
+fi
+docker compose up -d --build --wait

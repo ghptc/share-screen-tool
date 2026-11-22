@@ -1,22 +1,22 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
-import { ConnectionState, LocalVideoTrack, RoomEvent, Track, type Room } from 'livekit-client'
+import { ConnectionState, LocalAudioTrack, LocalVideoTrack, RoomEvent, Track, type Room } from 'livekit-client'
 import ScreenSharing, { captureOptions } from './ScreenSharing'
 
 class Raw extends EventTarget {
   readyState = 'live'
   kind = 'video'
   stop = vi.fn(() => { this.readyState = 'ended' })
-  getSettings = () => ({ width: 1280, height: 720, frameRate: 30 })
+  getSettings = (): MediaTrackSettings & { restrictOwnAudio?: boolean } => ({ width: 1280, height: 720, frameRate: 30 })
   end() { this.readyState = 'ended'; this.dispatchEvent(new Event('ended')) }
 }
 type VideoDouble = { mediaStreamTrack: Raw; source: Track.Source; streamState: Track.StreamState; stop: ReturnType<typeof vi.fn<() => void>>; attach: ReturnType<typeof vi.fn>; detach: ReturnType<typeof vi.fn> }
-type Publication = { trackSid: string; source: Track.Source; track?: VideoDouble; videoTrack?: VideoDouble; isMuted: boolean }
-type Participant = { identity: string; name: string; videoTrackPublications: Map<string, Publication> }
+type Publication = { trackSid: string; source: Track.Source; track?: VideoDouble; videoTrack?: VideoDouble; audioTrack?: VideoDouble; isMuted: boolean; setSubscribed?: (subscribed: boolean) => void }
+type Participant = { identity: string; name: string; videoTrackPublications: Map<string, Publication>; audioTrackPublications: Map<string, Publication> }
 const sdk = vi.hoisted(() => ({ failWrap: false }))
 vi.mock('livekit-client', async importOriginal => {
   const actual = await importOriginal<typeof import('livekit-client')>()
-  return { ...actual, LocalVideoTrack: class {
+  class Wrapped {
     source = actual.Track.Source.ScreenShare
     streamState = actual.Track.StreamState.Active
     mediaStreamTrack: Raw
@@ -24,32 +24,35 @@ vi.mock('livekit-client', async importOriginal => {
     attach = vi.fn()
     detach = vi.fn()
     constructor(raw: Raw) { if (sdk.failWrap) throw new Error('Video track initialization failed'); this.mediaStreamTrack = raw; this.stop = vi.fn(() => raw.stop()) }
-  } }
+  }
+  return { ...actual, LocalVideoTrack: Wrapped, LocalAudioTrack: Wrapped }
 })
 class RoomDouble {
   state = ConnectionState.Connected
   remoteParticipants = new Map<string, Participant>()
   listeners = new Map<string, Set<(...args: unknown[]) => void>>()
   localParticipant = {
-    identity: 'alice', name: 'Alice', videoTrackPublications: new Map<string, Publication>(),
+    identity: 'alice', name: 'Alice', videoTrackPublications: new Map<string, Publication>(), audioTrackPublications: new Map<string, Publication>(),
     publishTrack: vi.fn<(track: VideoDouble, options: unknown) => Promise<Publication>>(),
     unpublishTrack: vi.fn<(track: VideoDouble, stop?: boolean) => Promise<void>>(),
   }
   constructor() {
     this.localParticipant.publishTrack.mockImplementation(async track => {
-      const pub = { trackSid: 'local-screen', source: Track.Source.ScreenShare, track, videoTrack: track, isMuted: false }
-      this.localParticipant.videoTrackPublications.set(pub.trackSid, pub)
+      const isAudio = track.source === Track.Source.ScreenShareAudio
+      const pub = { trackSid: isAudio ? 'local-audio' : 'local-screen', source: track.source, track, videoTrack: isAudio ? undefined : track, audioTrack: isAudio ? track : undefined, isMuted: false }
+      ;(isAudio ? this.localParticipant.audioTrackPublications : this.localParticipant.videoTrackPublications).set(pub.trackSid, pub)
       track.mediaStreamTrack.addEventListener('ended', () => { void this.localParticipant.unpublishTrack(track, true) })
       this.emit(RoomEvent.LocalTrackPublished, pub)
       return pub
     })
     this.localParticipant.unpublishTrack.mockImplementation(async (track, stop) => {
       if (stop) track.stop()
-      for (const pub of this.localParticipant.videoTrackPublications.values()) {
+      for (const pub of [...this.localParticipant.videoTrackPublications.values(), ...this.localParticipant.audioTrackPublications.values()]) {
         if (pub.track !== track) continue
         this.localParticipant.videoTrackPublications.delete(pub.trackSid)
+        this.localParticipant.audioTrackPublications.delete(pub.trackSid)
         this.emit(RoomEvent.LocalTrackUnpublished, pub)
-        pub.track = undefined; pub.videoTrack = undefined
+        pub.track = undefined; pub.videoTrack = undefined; pub.audioTrack = undefined
       }
     })
   }
@@ -59,7 +62,7 @@ class RoomDouble {
   addRemote(identity: string, sid: string) {
     const track = new LocalVideoTrack(new Raw() as unknown as MediaStreamTrack) as unknown as VideoDouble
     const publication = { trackSid: sid, source: Track.Source.ScreenShare, videoTrack: track, track, isMuted: false }
-    const participant = { identity, name: identity, videoTrackPublications: new Map([[sid, publication]]) }
+    const participant = { identity, name: identity, videoTrackPublications: new Map([[sid, publication]]), audioTrackPublications: new Map<string, Publication>() }
     this.remoteParticipants.set(identity, participant)
     return { participant, publication, track }
   }
@@ -67,7 +70,7 @@ class RoomDouble {
 let room: RoomDouble
 let raw: Raw
 let capture: ReturnType<typeof vi.fn>
-function stream(track = raw) { return { getVideoTracks: () => [track], getTracks: () => [track] } as unknown as MediaStream }
+function stream(track = raw) { return { getVideoTracks: () => [track], getAudioTracks: () => [], getTracks: () => [track] } as unknown as MediaStream }
 function mount(canPublish = true) { return render(<ScreenSharing room={room as unknown as Room} canPublish={canPublish} />) }
 async function start() { fireEvent.click(screen.getByRole('button', { name: 'Start sharing' })); await waitFor(() => expect(screen.getByRole('button', { name: 'Stop sharing' })).toBeEnabled()) }
 beforeEach(() => {
@@ -131,7 +134,7 @@ test('handles remote subscription changes, mute, and unpublication', () => {
   act(() => { bob.publication.videoTrack = undefined as unknown as VideoDouble; room.emit(RoomEvent.TrackUnsubscribed) })
   expect(bob.track.detach).toHaveBeenCalledTimes(1)
   expect(screen.getByText('Waiting for video')).toBeInTheDocument()
-  act(() => { bob.participant.videoTrackPublications.clear(); room.emit(RoomEvent.TrackUnpublished) })
+  act(() => { bob.participant.videoTrackPublications.clear(); bob.participant.audioTrackPublications.clear(); room.emit(RoomEvent.TrackUnpublished) })
   expect(screen.queryByRole('article')).not.toBeInTheDocument()
 })
 
@@ -290,4 +293,178 @@ test('native capture end cleans up even if the SDK does not forward its ended ev
   await waitFor(() => expect(screen.queryByRole('article')).not.toBeInTheDocument())
   expect(raw.stop).toHaveBeenCalled()
   expect(room.localParticipant.unpublishTrack).toHaveBeenCalled()
+})
+
+function withAudio(audio: Raw) {
+  raw.getSettings = () => ({ displaySurface: 'browser' })
+  audio.getSettings = () => ({ restrictOwnAudio: true })
+  audio.kind = 'audio'
+  capture.mockResolvedValue({ getVideoTracks: () => [raw], getAudioTracks: () => [audio], getTracks: () => [raw, audio] })
+}
+function optIn() { fireEvent.click(screen.getByRole('checkbox', { name: 'Share audio from a browser tab' })) }
+
+test('audio requires explicit opt-in and no microphone fallback occurs when unavailable', async () => {
+  mount(); optIn()
+  expect(capture).not.toHaveBeenCalled()
+  await start()
+  expect(capture.mock.calls[0][0]).toMatchObject({ audio: { restrictOwnAudio: true, suppressLocalAudioPlayback: false }, systemAudio: 'exclude', windowAudio: 'exclude', selfBrowserSurface: 'exclude' })
+  expect(screen.getByLabelText('Audio capture status')).toHaveTextContent('Browser returned no screen audio')
+  expect(room.localParticipant.publishTrack).toHaveBeenCalledTimes(1)
+  expect(navigator.mediaDevices.getUserMedia).toBeUndefined()
+})
+
+test.each([
+  ['monitor', true], ['window', true], [undefined, true], ['browser', undefined], ['browser', false],
+] as const)('stops ambiguous picker audio (surface %s, restriction %s) before publication', async (displaySurface, restrictOwnAudio) => {
+  const audio = new Raw()
+  withAudio(audio)
+  raw.getSettings = () => ({ displaySurface })
+  audio.getSettings = () => ({ restrictOwnAudio })
+  render(<ScreenSharing room={room as unknown as Room} canPublish nativeAudioControl="publisher-control" />)
+  optIn(); await start()
+  expect(audio.stop).toHaveBeenCalled()
+  expect(room.localParticipant.publishTrack).toHaveBeenCalledTimes(1)
+  expect(screen.getByRole('button', { name: 'Pair native audio helper' })).toBeEnabled()
+  expect(screen.getByLabelText('Audio capture status')).toHaveTextContent('Audio skipped')
+})
+
+test('unexpected audio without opt-in is stopped and never published', async () => {
+  const audio = new Raw(); withAudio(audio); mount(); await start()
+  expect(audio.stop).toHaveBeenCalled()
+  expect(room.localParticipant.publishTrack).toHaveBeenCalledTimes(1)
+})
+
+test('opted-in audio publishes only as screen audio and both tracks stop together', async () => {
+  const audio = new Raw(); withAudio(audio); mount(); optIn(); await start()
+  await waitFor(() => expect(screen.getByLabelText('Audio capture status')).toHaveTextContent('Screen-capture audio published'))
+  expect(room.localParticipant.publishTrack.mock.calls[1][1]).toMatchObject({ source: Track.Source.ScreenShareAudio })
+  expect(document.querySelectorAll('audio')).toHaveLength(0)
+  fireEvent.click(screen.getByRole('button', { name: 'Stop sharing' }))
+  await waitFor(() => expect(room.localParticipant.audioTrackPublications.size).toBe(0))
+  expect(audio.stop).toHaveBeenCalled(); expect(raw.stop).toHaveBeenCalled()
+})
+
+test('audio publication failure leaves video sharing and releases the audio track', async () => {
+  const audio = new Raw(); withAudio(audio)
+  const publish = room.localParticipant.publishTrack.getMockImplementation()!
+  room.localParticipant.publishTrack.mockImplementation((track, options) => track.source === Track.Source.ScreenShareAudio ? Promise.reject(new Error('Audio rejected')) : publish(track, options))
+  mount(); optIn(); await start()
+  await waitFor(() => expect(screen.getByLabelText('Audio capture status')).toHaveTextContent('publication failed'))
+  expect(audio.stop).toHaveBeenCalled(); expect(raw.stop).not.toHaveBeenCalled()
+  expect(screen.getByRole('button', { name: 'Stop sharing' })).toBeEnabled()
+})
+
+test('audio ending independently removes audio while video continues', async () => {
+  const audio = new Raw(); withAudio(audio); mount(); optIn(); await start()
+  await act(async () => audio.end())
+  expect(room.localParticipant.audioTrackPublications.size).toBe(0)
+  expect(raw.stop).not.toHaveBeenCalled()
+  expect(screen.getByRole('button', { name: 'Stop sharing' })).toBeEnabled()
+})
+
+test('screen native ending and departure clean up associated audio', async () => {
+  const audio = new Raw(); withAudio(audio); const { unmount } = mount(); optIn(); await start()
+  await act(async () => raw.end())
+  await waitFor(() => expect(room.localParticipant.audioTrackPublications.size).toBe(0))
+  expect(audio.stop).toHaveBeenCalled(); unmount()
+})
+
+test('audio survives temporary SDK unpublication during reconnect without another picker', async () => {
+  const audio = new Raw(); withAudio(audio); mount(); optIn(); await start()
+  const audioTrack = room.localParticipant.publishTrack.mock.calls[1][0]
+  await act(async () => {
+    room.state = ConnectionState.Reconnecting; room.emit(RoomEvent.ConnectionStateChanged, room.state)
+    await room.localParticipant.unpublishTrack(audioTrack, false)
+    await room.localParticipant.publishTrack(audioTrack, {})
+    room.state = ConnectionState.Connected; room.emit(RoomEvent.ConnectionStateChanged, room.state); room.emit(RoomEvent.Reconnected)
+  })
+  expect(audio.stop).not.toHaveBeenCalled(); expect(capture).toHaveBeenCalledTimes(1)
+  fireEvent.click(screen.getByRole('button', { name: 'Stop sharing' }))
+  await waitFor(() => expect(room.localParticipant.audioTrackPublications.size).toBe(0))
+})
+
+test('remote audio is deduplicated by identity and removed when a participant leaves', async () => {
+  const bob = room.addRemote('Bob', 'screen')
+  const audio = new LocalAudioTrack(new Raw() as unknown as MediaStreamTrack) as unknown as VideoDouble
+  bob.participant.audioTrackPublications.set('audio', { trackSid: 'audio', source: Track.Source.ScreenShareAudio, audioTrack: audio, isMuted: false })
+  vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
+  mount()
+  act(() => { room.emit(RoomEvent.TrackSubscribed); room.emit(RoomEvent.TrackSubscribed) })
+  expect(document.querySelectorAll('audio')).toHaveLength(1); expect(audio.attach).toHaveBeenCalledOnce()
+  act(() => { room.remoteParticipants.clear(); room.emit(RoomEvent.ParticipantDisconnected) })
+  expect(audio.detach).toHaveBeenCalledOnce(); expect(audio.stop).not.toHaveBeenCalled()
+  expect(document.querySelectorAll('audio')).toHaveLength(0)
+})
+
+
+test('cancellation during pending audio publication stops both captures and removes late publication', async () => {
+  const audio = new Raw(); withAudio(audio)
+  let resolve!: () => void
+  const publish = room.localParticipant.publishTrack.getMockImplementation()!
+  room.localParticipant.publishTrack.mockImplementation(async (track, options) => {
+    if (track.source === Track.Source.ScreenShareAudio) await new Promise<void>(r => { resolve = r })
+    return publish(track, options)
+  })
+  mount(); optIn(); fireEvent.click(screen.getByRole('button', { name: 'Start sharing' }))
+  await waitFor(() => expect(room.localParticipant.publishTrack).toHaveBeenCalledTimes(2))
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel sharing request' }))
+  expect(raw.stop).toHaveBeenCalled(); expect(audio.stop).toHaveBeenCalled()
+  await act(async () => resolve())
+  expect(room.localParticipant.videoTrackPublications.size).toBe(0)
+  expect(room.localParticipant.audioTrackPublications.size).toBe(0)
+})
+
+test('audio option still requires picker consent and a denial publishes nothing', async () => {
+  capture.mockRejectedValueOnce(new DOMException('Denied', 'NotAllowedError'))
+  mount(); optIn()
+  expect(capture).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Start sharing' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('denied or cancelled')
+  expect(room.localParticipant.publishTrack).not.toHaveBeenCalled()
+})
+
+
+test('a lingering audio publication blocks a second capture rather than duplicating audio', async () => {
+  room.localParticipant.audioTrackPublications.set('stale-audio', { trackSid: 'stale-audio', source: Track.Source.ScreenShareAudio, isMuted: false })
+  mount(); fireEvent.click(screen.getByRole('button', { name: 'Start sharing' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('previous screen publication')
+  expect(capture).not.toHaveBeenCalled()
+})
+
+
+test('native helper audio is associated with the authorized video owner, with one playback element', () => {
+ const bob = room.addRemote('Bob', 'screen')
+ const browserAudio = new LocalAudioTrack(new Raw() as unknown as MediaStreamTrack) as unknown as VideoDouble
+ bob.participant.audioTrackPublications.set('browser-audio', { trackSid: 'browser-audio', source: Track.Source.ScreenShareAudio, audioTrack: browserAudio, isMuted: false })
+ const helper = room.addRemote('native-audio-helper', 'unused')
+ helper.participant.videoTrackPublications.clear()
+ Object.assign(helper.participant, { metadata: JSON.stringify({ nativeAudioOwner: 'Bob', nativeAudioScreen: 'screen' }) })
+ const audio = new LocalAudioTrack(new Raw() as unknown as MediaStreamTrack) as unknown as VideoDouble
+ helper.participant.audioTrackPublications.set('audio', { trackSid: 'audio', source: Track.Source.ScreenShareAudio, audioTrack: audio, isMuted: false })
+ vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
+ mount()
+ expect(document.querySelectorAll('audio')).toHaveLength(1)
+ expect(screen.getByLabelText('Bob audio playback')).toBeInTheDocument()
+ expect(screen.queryByLabelText('native-audio-helper audio playback')).not.toBeInTheDocument()
+ expect(browserAudio.attach).not.toHaveBeenCalled()
+ act(() => { bob.participant.videoTrackPublications.clear(); bob.participant.audioTrackPublications.clear(); room.emit(RoomEvent.TrackUnpublished) })
+ expect(document.querySelectorAll('audio')).toHaveLength(0)
+ expect(audio.detach).toHaveBeenCalledOnce()
+})
+
+
+test('local native preview suppression uses participant identity, not names or another session', async () => {
+ room = new RoomDouble()
+ const helper = room.addRemote('native-audio-own', 'unused')
+ helper.participant.videoTrackPublications.clear()
+ Object.assign(helper.participant, { metadata: JSON.stringify({nativeAudioOwner: 'alice', nativeAudioScreen: 'local-screen'}) })
+ const audio = new LocalAudioTrack(new Raw() as unknown as MediaStreamTrack) as unknown as VideoDouble
+ const setSubscribed = vi.fn()
+ helper.participant.audioTrackPublications.set('native', {trackSid: 'native',source:Track.Source.ScreenShareAudio,audioTrack:audio,isMuted:false,setSubscribed})
+ raw = new Raw(); capture.mockResolvedValue(stream())
+ render(<ScreenSharing room={room as unknown as Room} canPublish nativeAudioControl="publisher-control" />); await start()
+ expect(setSubscribed).toHaveBeenCalledWith(false)
+ expect(audio.attach).not.toHaveBeenCalled()
+ expect(document.querySelectorAll('audio')).toHaveLength(0)
+ expect(screen.getByText(/Preview is silent only in this publisher session/)).toBeInTheDocument()
 })

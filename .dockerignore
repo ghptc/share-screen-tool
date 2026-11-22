@@ -4,3 +4,10 @@
 **/dist
 **/coverage
 backend/bin
+
+# Native helper runs on the desktop, outside application containers.
+native-audio/
+
+.local-player/
+**/test-results/
+**/playwright-report/

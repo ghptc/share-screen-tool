@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import ScreenSharing from './ScreenSharing'
 import { ConnectionState, DisconnectReason, Room, RoomEvent } from 'livekit-client'
 
-export type JoinResult = { token: string; serverUrl: string; identity: string; displayName: string; roomId: string; title: string; canPublish: boolean }
+export type JoinResult = { nativeAudioControl?: string; token: string; serverUrl: string; identity: string; displayName: string; roomId: string; title: string; canPublish: boolean }
 type Invitation = { id: string; invite: string; publishKey?: string }
 
 const roomPattern = /^[A-Za-z0-9_-]{24}$/
@@ -139,7 +139,7 @@ export default function Rooms() {
   if (joined) return <RoomSession credentials={joined} link={link} onLeave={() => { setJoined(null); setNotice('You left the room. You can join again below.') }} />
   return <section aria-labelledby="rooms-heading">
     <h2 id="rooms-heading">Rooms and participants</h2>
-    <p>Viewer invitations allow viewing. Publisher invitations also allow screen sharing after explicit browser consent. Audio capture is disabled.</p>
+    <p>Viewer invitations allow viewing. Publisher invitations also allow screen sharing after explicit browser consent. Screen audio is optional and requires explicit consent.</p>
     {error && <p role="alert">{error}</p>}
     {notice && <p role="status">{notice}</p>}
     <label>Display name<input value={name} onChange={e => setName(e.target.value)} maxLength={64} disabled={pending} autoComplete="nickname" aria-describedby="display-name-help" /></label>
@@ -203,8 +203,8 @@ export function RoomSession({ credentials, link, onLeave }: { credentials: JoinR
     <p role="status">Connection: <strong>{connection}</strong></p>
     {error && <p role="alert">{error}</p>}
     {(connection === ConnectionState.Reconnecting || connection === ConnectionState.SignalReconnecting) && <p>Reconnecting automatically. Participant presence may be out of date.</p>}
-    <p>Publishing permission: {credentials.canPublish ? 'screen video only' : 'viewer only'}. Microphone and system audio capture are disabled.</p>
-    {mediaRoom && <ScreenSharing room={mediaRoom} canPublish={credentials.canPublish} />}
+    <p>Publishing permission: {credentials.canPublish ? 'screen video and optional screen audio' : 'viewer only'}. Microphone and camera publishing are disabled. Screen audio availability depends on the browser and selected source.</p>
+    {mediaRoom && <ScreenSharing room={mediaRoom} canPublish={credentials.canPublish} nativeAudioControl={credentials.nativeAudioControl} />}
     <h3>Participants ({participants.length})</h3>
     <ul aria-label="Participants">{participants.map(p => <li key={p.identity}>{p.name}{p.identity === credentials.identity ? ' (you)' : ''}</li>)}</ul>
     <label>Share invitation<input readOnly value={viewerLink} onFocus={e => e.currentTarget.select()} /></label>

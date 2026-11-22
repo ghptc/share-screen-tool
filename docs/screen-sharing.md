@@ -4,7 +4,7 @@
 
 1. Open `http://localhost:5173` and create a room with your local operator key. Joining never captures anything.
 2. Share the separate **Screen publisher invitation** with other intended publishers. **Share invitation** continues to grant viewing only.
-3. Each publisher clicks **Start sharing** and approves their browser's source picker. Capture requests video only; microphone and system audio are excluded both by capture options and source-scoped server grants.
+3. Each publisher clicks **Start sharing** and approves their browser's source picker. Capture defaults to video only. Milestone 4.1 adds explicit opt-in for browser-returned screen audio; microphone/camera publishing remains excluded. See [screen audio](system-audio.md).
 4. Each published screen appears independently in the responsive grid, labeled with its owner and stream state. Local preview is labeled `(you)`. Fullscreen applies to the selected tile; Escape exits.
 5. Stop with **Stop sharing**, the browser's sharing controls, or **Leave room**. Cancelling while a source picker is open cannot close that browser-owned picker; a later selection is discarded and stopped.
 
@@ -12,7 +12,7 @@ A viewer who needs to publish must receive the publisher invitation and leave/re
 
 ## Capture and transport
 
-`navigator.mediaDevices.getDisplayMedia` is called directly from the start button before any await. Constraints are `audio:false` and video width/height/frameRate with ideal values 2560/1440/60. No `min` or `exact` constraints, automatic recapture, X11 assumptions, or host socket/GPU mounts are added. Unexpected non-selected tracks are stopped immediately.
+`navigator.mediaDevices.getDisplayMedia` is called directly from the start button before any await. Default constraints are `audio:false` (tab-audio opt-in requests own-document audio restriction, system/window audio exclusion and continued local playback) and video width/height/frameRate with ideal values 2560/1440/60. No `min` or `exact` constraints, automatic recapture, X11 assumptions, or host socket/GPU mounts are added. Unexpected non-selected tracks are stopped immediately.
 
 The selected native video track is wrapped in LiveKit's `LocalVideoTrack` and published as `Track.Source.ScreenShare`. VP8 is the initial compatibility choice, with simulcast requested, an 8 Mbps maximum encoding bitrate and a 60 FPS maximum encoding rate, and balanced degradation. These are limits/requests, not measured throughput or a sustainable 1440p60 guarantee. The installed SDK disables screen simulcast on Firefox because of its known layer issue. Codec comparisons remain future work. The stabilization pass adds read-only measured RTP diagnostics, without audio or new quality controls.
 
@@ -38,7 +38,7 @@ Use the installed Chromium and Firefox under Hyprland. Do not change Wayland per
 - Deny/cancel permission and confirm no screen remains live. Leave with a picker open, then select a source and verify it is discarded.
 - Test a controlled network interruption and ensure capture does not restart without consent after a terminal disconnect. Do not interpret successful signaling recovery as proof of full ICE restart recovery.
 
-The original forced loopback candidate prevented Firefox ICE connectivity. The stabilization pass removed that override; the SFU now auto-selects its existing private Docker bridge interface while host port bindings stay on loopback. Firefox generated-media tests now connect and play without preference changes. Actual desktop capture remains unverified. Follow [the detailed native-capture procedure](desktop-validation.md). See [Linux findings](linux-capture.md) and [test evidence](milestone-3-validation.md).
+The original forced loopback candidate prevented Firefox ICE connectivity. The stabilization pass removed that override; the SFU now auto-selects its existing private Docker bridge interface while host port bindings stay on loopback. Firefox generated-media tests now connect and play without preference changes. The user subsequently reported real desktop video capture/playback in two Chrome sessions; system audio still needs the separate manual test. Follow [the detailed native-capture procedure](desktop-validation.md). See [Linux findings](linux-capture.md) and [test evidence](milestone-3-validation.md).
 
 ## References
 
