@@ -25,14 +25,13 @@ Reserve these four ports on the instance’s **private interface**. If any belon
 
 Run this block in a workstation Bash shell. `dist/ec2` holds local release packages. The packager uses committed source and omits the workstation environment, helper executable and test outputs. The destination is a new staging directory beneath this service.
 
-To repeat the local production smoke test after packaging, run `./scripts/test-ec2 "$(git rev-parse HEAD)"` on Linux with Docker. It verifies HTTP-01 with Pebble, IP certificate trust across edge replacement, the OAuth redirect, copied-link denial and the patched SFU callback. It starts neither the real bot nor an EC2 service.
+For this rollout use the existing `98c78ca` package. To repeat its local production smoke test, run `./scripts/test-ec2 "$(git rev-parse '98c78ca^{commit}')"` on Linux with the packaged images loaded. It verifies HTTP-01 with Pebble, IP certificate trust across edge replacement, the OAuth redirect, copied-link denial and the patched SFU callback.
 
 ```bash
 set -e
-rev=$(git rev-parse HEAD)
+rev=98c78cad23e20f8f1413cb885cf237ac024b17f8
 bundle="$PWD/dist/ec2/$rev"
-test -d "$bundle" || ./scripts/package-ec2 "$PWD/dist/ec2"
-(cd "$bundle" && sha256sum -c SHA256SUMS)
+(cd "$bundle" && sha256sum --strict -c SHA256SUMS && test "$(cat RELEASE)" = "$rev")
 ssh aws-prod 'set -e; base=/opt/services/whiterun-live
   sudo install -d -m 0750 -o "$(id -un)" -g "$(id -gn)" "$base"
   mkdir -p "$base/releases"; install -d -m 0700 "$base/shared"'
@@ -40,9 +39,11 @@ ssh aws-prod "test ! -e /opt/services/whiterun-live/releases/$rev && mkdir -p /o
 rsync -a --partial --no-owner --no-group "$bundle/" "aws-prod:/opt/services/whiterun-live/releases/$rev.incoming/"
 ssh aws-prod "set -e; cd /opt/services/whiterun-live/releases/$rev.incoming
   sha256sum -c SHA256SUMS; test \"\$(cat RELEASE)\" = '$rev'
-  docker image load -i images.tar.gz; cd ..; mv -T '$rev.incoming' '$rev'"
+  chmod 0644 Caddyfile; docker image load -i images.tar.gz; cd ..; mv -T '$rev.incoming' '$rev'"
 ssh -t aws-prod "cd /opt/services/whiterun-live/releases/$rev && exec bash"
 ```
+
+The original package stores the Caddyfile as mode `0600`. The restricted player process needs read access to this non-secret file. The staging command adjusts only its mode. The checksummed contents and release images stay identical.
 
 ## 3. Configure and start on Ubuntu
 

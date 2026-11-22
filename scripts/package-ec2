@@ -24,6 +24,12 @@ build backend backend/Dockerfile .
 build player infrastructure/discord-player/Dockerfile .
 cp deploy/ec2/{compose,compose.yaml,Caddyfile} scripts/prepare-discord-private "$work/package"
 cd "$work/package"
+# The edge drops DAC_OVERRIDE. Its bind-mounted routing config is public,
+# while credentials and the release directory retain their protected modes.
+chmod 0644 Caddyfile
+docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --mount "type=bind,source=$PWD/Caddyfile,target=/etc/caddy/Caddyfile,readonly" \
+  --entrypoint /bin/sh "whiterun-live/player:$revision" -c 'cat /etc/caddy/Caddyfile >/dev/null'
 printf '%s\n' "$revision" > RELEASE
 docker image save "${images[@]}" | gzip -1 > images.tar.gz
 sha256sum RELEASE compose compose.yaml Caddyfile prepare-discord-private images.tar.gz > SHA256SUMS
