@@ -31,3 +31,33 @@ func TestVoiceCommandRequiresFreshChannel(t *testing.T) {
 		t.Fatal("unauthorized discovery")
 	}
 }
+
+func TestFailClosedOnOfflineGapAndUnavailable(t *testing.T) {
+	var g Gateway
+	snapshot := func(seq int64) {
+		g.Observe(&dg.Event{Sequence: seq, Struct: &dg.GuildCreate{Guild: &dg.Guild{ID: "11", Channels: []*dg.Channel{{ID: "22", Type: dg.ChannelTypeGuildVoice}}, VoiceStates: []*dg.VoiceState{{UserID: "33", ChannelID: "22"}}}}})
+	}
+	g.Observe(&dg.Event{Type: "READY", Sequence: 1})
+	snapshot(2)
+	first, ok := g.Lookup("11", "33", time.Now())
+	if !ok {
+		t.Fatal("snapshot missing")
+	}
+	g.Offline()
+	if _, ok := g.Lookup("11", "33", time.Now()); ok {
+		t.Fatal("disconnected state accepted")
+	}
+	g.Observe(&dg.Event{Type: "READY", Sequence: 1})
+	if _, ok := g.Lookup("11", "33", time.Now()); ok {
+		t.Fatal("ready without guild snapshot accepted")
+	}
+	snapshot(2)
+	second, ok := g.Lookup("11", "33", time.Now())
+	if !ok || first.Epoch == second.Epoch {
+		t.Fatal("resumed old channel admission")
+	}
+	g.Observe(&dg.Event{Sequence: 3, Struct: &dg.GuildDelete{Guild: &dg.Guild{ID: "11", Unavailable: true}}})
+	if _, ok := g.Lookup("11", "33", time.Now()); ok {
+		t.Fatal("unavailable guild accepted")
+	}
+}
