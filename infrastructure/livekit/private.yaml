@@ -1,0 +1,7 @@
+port: 7880
+rtc:
+  tcp_port: 17891
+  udp_port: 17892
+  use_external_ip: false
+logging:
+  level: warn

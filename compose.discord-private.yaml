@@ -1,0 +1,86 @@
+# Standalone private-guild stack. The workstation Compose file is independent.
+name: whiterun-discord-private
+services:
+  livekit:
+    build: ./infrastructure/livekit/admission
+    command: ["--config", "/etc/livekit.yaml"]
+    volumes:
+      - ./infrastructure/livekit/private.yaml:/etc/livekit.yaml:ro
+    environment:
+      LIVEKIT_KEYS: "${DISCORD_MEDIA_KEY:?DISCORD_MEDIA_KEY}: ${DISCORD_MEDIA_SECRET:?DISCORD_MEDIA_SECRET}"
+      NODE_IP: ${DISCORD_PRIVATE_IP:-}
+      DISCORD_ADMISSION_URL: http://backend:8080/internal/discord/admit
+      DISCORD_ADMISSION_KEY: ${DISCORD_PRIVATE_ADMISSION_KEY:?DISCORD_PRIVATE_ADMISSION_KEY}
+    ports:
+      - "${DISCORD_PRIVATE_IP:-127.0.0.1}:17891:17891/tcp"
+      - "${DISCORD_PRIVATE_IP:-127.0.0.1}:17892:17892/udp"
+    security_opt: ["no-new-privileges:true"]
+  backend:
+    build: &backend_build
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      WHITERUN_ENV: production
+      DISCORD_MODE: discord
+      APP_ORIGIN: https://${DISCORD_PRIVATE_HOST:-localhost}:8443
+      BACKEND_ADDR: 0.0.0.0:8080
+      LIVEKIT_HTTP_URL: http://livekit:7880
+      LIVEKIT_WS_URL: wss://${DISCORD_PRIVATE_HOST:-localhost}:8443
+      LIVEKIT_API_KEY: ${DISCORD_MEDIA_KEY}
+      LIVEKIT_API_SECRET: ${DISCORD_MEDIA_SECRET}
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:?DISCORD_CLIENT_ID}
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:?DISCORD_CLIENT_SECRET}
+      DISCORD_CHANNELS: ${DISCORD_CHANNELS:?DISCORD_CHANNELS}
+      DISCORD_ROOM_KEY: ${DISCORD_PRIVATE_ROOM_KEY:?DISCORD_PRIVATE_ROOM_KEY}
+      DISCORD_ADMISSION_KEY: ${DISCORD_PRIVATE_ADMISSION_KEY}
+      DISCORD_VOICE_URL: http://discord-bot:8091
+      DISCORD_VOICE_KEY: ${DISCORD_PRIVATE_VOICE_KEY:?DISCORD_PRIVATE_VOICE_KEY}
+      DISCORD_DENIED_USERS: ${DISCORD_DENIED_USERS:-}
+    healthcheck:
+      test: ["CMD", "/server", "healthcheck", "http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+  discord-bot:
+    build: *backend_build
+    entrypoint: ["/discord-bot"]
+    environment:
+      WHITERUN_ENV: production
+      DISCORD_MODE: discord
+      APP_ORIGIN: https://${DISCORD_PRIVATE_HOST:-localhost}:8443
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:?DISCORD_BOT_TOKEN}
+      DISCORD_CHANNELS: ${DISCORD_CHANNELS}
+      DISCORD_ROOM_KEY: ${DISCORD_PRIVATE_ROOM_KEY}
+      DISCORD_VOICE_KEY: ${DISCORD_PRIVATE_VOICE_KEY}
+      DISCORD_VOICE_ADDR: 0.0.0.0:8091
+    depends_on:
+      backend:
+        condition: service_healthy
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+  player:
+    build:
+      context: .
+      dockerfile: infrastructure/discord-player/Dockerfile
+    environment:
+      PLAYER_HOST: ${DISCORD_PRIVATE_HOST:-localhost}
+    ports:
+      - "${DISCORD_PRIVATE_IP:-127.0.0.1}:8443:8443/tcp"
+    volumes:
+      - private-tls:/data
+    healthcheck:
+      test: ["CMD", "test", "-s", "/data/caddy/pki/authorities/local/root.crt"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+    depends_on:
+      backend:
+        condition: service_healthy
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+volumes:
+  private-tls:
