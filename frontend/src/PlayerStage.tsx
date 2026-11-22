@@ -3,6 +3,8 @@ import type { TrackPublication } from 'livekit-client'
 import { ScreenTile, type Screen } from './ScreenTile'
 import DesktopAudio from './DesktopAudio'
 import { readAudioPreference, writeAudioPreference } from './gameAudioSession'
+import MediaDiagnostics from './MediaDiagnostics'
+import { resolutions, type VideoTarget } from './videoQuality'
 import RemoteScreenAudio from './RemoteScreenAudio'
 
 function Icon({ name }: { name: 'share' | 'audio' | 'expand' | 'grid' | 'stop' }) {
@@ -40,6 +42,10 @@ type Props = {
   control?: string
   canPublish: boolean
   error: string
+  quality: VideoTarget
+  nativeSettings?: MediaTrackSettings
+  qualityBusy: boolean
+  changeQuality: (target: VideoTarget) => void
   start: () => void
   stop: () => void
 }
@@ -52,6 +58,7 @@ export default function PlayerStage({
   screen,
   control,
   canPublish,
+  quality, nativeSettings, qualityBusy, changeQuality,
   error,
   start,
   stop,
@@ -64,13 +71,24 @@ export default function PlayerStage({
   }, [])
   const [focus, setFocus] = useState('')
   const [menu, setMenu] = useState(false)
+  const [qualityOpen, setQualityOpen] = useState(false)
+  const qualityPanel = useRef<HTMLDivElement>(null)
+  const qualityButton = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    if (!qualityOpen) return
+    const escape = (e: KeyboardEvent) => { if (e.key === 'Escape') { setQualityOpen(false); qualityButton.current?.focus() } }
+    const outside = (e: PointerEvent) => { if (!qualityPanel.current?.contains(e.target as Node) && !qualityButton.current?.contains(e.target as Node)) setQualityOpen(false) }
+    document.addEventListener('keydown', escape)
+    document.addEventListener('pointerdown', outside)
+    return () => { document.removeEventListener('keydown', escape); document.removeEventListener('pointerdown', outside) }
+  }, [qualityOpen])
   const [audioState, setAudioState] = useState('')
   const [audioEnabled, setAudioEnabled] = useState(
     () => readAudioPreference('whiterun.gameAudio.enabled') !== 'off',
   )
   const reportAudio = useCallback((status: string) => {
     setAudioState(status)
-    if (status === 'Choose audio source') setMenu(true)
+    if (status === 'Choose audio source') { setQualityOpen(false); setMenu(true) }
   }, [])
   const audioToggle = control && canPublish && (
     <label className="share-audio-toggle">
@@ -210,11 +228,25 @@ export default function PlayerStage({
           aria-expanded={menu}
           aria-controls="player-audio"
           className="audio-action"
-          onClick={() => setMenu((v) => !v)}
+          onClick={() => { setQualityOpen(false); setMenu((v) => !v) }}
         >
           <Icon name="audio" />
           {(sharing && audioEnabled && audioState) || 'Audio'}
         </button>
+        <button ref={qualityButton} aria-expanded={qualityOpen} aria-controls="player-quality" onClick={() => { setMenu(false); setQualityOpen(v => !v) }}>Quality</button>
+        {qualityOpen && <div id="player-quality" className="player-popover quality-menu" role="region" aria-label="Quality controls" ref={qualityPanel}>
+          {canPublish && <>
+            <label>Publish FPS <select value={quality.fps} disabled={qualityBusy} onChange={e => changeQuality({...quality, fps: Number(e.target.value)})}>
+              {[60,30,15].map(fps => <option key={fps}>{fps}</option>)}
+            </select></label>
+            <label>Publish resolution <select value={quality.height} disabled={qualityBusy || !sharing} onChange={e => changeQuality({...quality, height: Number(e.target.value)})}>
+              <option value={0}>Native</option>{resolutions(nativeSettings).map(h => <option value={h} key={h}>{h}p</option>)}
+            </select></label>
+          </>}
+          {screens.filter(s => !focused || s.key === focus || s.local).map(s => <div key={s.key}><strong>{s.owner}</strong>
+            <MediaDiagnostics track={s.track} local={s.local} connected={connected} />
+          </div>)}
+        </div>}
         {blocked.size > 0 && <button onClick={enableAudio}>Enable audio</button>}
         <button
           className="icon-action"

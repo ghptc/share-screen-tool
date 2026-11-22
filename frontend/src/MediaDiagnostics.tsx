@@ -4,7 +4,7 @@ import { measureMedia, sampleReport, type MediaMetrics, type StatsSample } from 
 
 type View = { metrics?: MediaMetrics; width?: number; height?: number; visible: boolean; background: boolean; enabled?: boolean; sampledAt?: string }
 export default function MediaDiagnostics({ track, local, video, enabled, connected }: {
-  track: TrackPublication['videoTrack']; local: boolean; video: RefObject<HTMLVideoElement | null>; enabled?: () => boolean; connected: boolean
+  track: TrackPublication['videoTrack']; local: boolean; video?: RefObject<HTMLVideoElement | null>; enabled?: () => boolean; connected: boolean
 }) {
   const [view, setView] = useState<View>({ visible: false, background: false })
   const [copyStatus, setCopyStatus] = useState('')
@@ -13,7 +13,7 @@ export default function MediaDiagnostics({ track, local, video, enabled, connect
     let timer: ReturnType<typeof setTimeout> | undefined
     let previous: StatsSample | undefined
     let visible = false
-    const element = video.current
+    const element = video?.current ?? track?.attachedElements?.find((e): e is HTMLVideoElement => e instanceof HTMLVideoElement)
     const observer = element && typeof IntersectionObserver !== 'undefined' ? new IntersectionObserver(entries => {
       visible = entries.some(entry => entry.isIntersecting && entry.intersectionRect.width > 0 && entry.intersectionRect.height > 0)
     }) : undefined
@@ -49,6 +49,9 @@ export default function MediaDiagnostics({ track, local, video, enabled, connect
     <dl>
       <div><dt>{local ? 'Encoded resolution' : 'Decoded resolution'}</dt><dd>{view.width && view.height ? `${view.width} × ${view.height}` : 'unavailable'}</dd></div>
       <div><dt>{local ? 'Encoded FPS (largest active layer)' : 'Decoded FPS'}</dt><dd>{format(m?.fps)}</dd></div>
+      {local && <div><dt>Capture size / sampled FPS</dt><dd>{track?.mediaStreamTrack?.getSettings?.().width ?? 'unavailable'} × {track?.mediaStreamTrack?.getSettings?.().height ?? 'unavailable'} / {format(m?.captureFps)}</dd></div>}
+      {local && <div><dt>Encoder / limitation</dt><dd>{m?.encoder ?? 'unavailable'} / {m?.limitation ?? 'unavailable'}</dd></div>}
+      {!local && <div><dt>Frames dropped (total)</dt><dd>{format(m?.dropped, 0)}</dd></div>}
       <div><dt>Video RTP bitrate</dt><dd>{m?.bitrateBps === undefined ? 'unavailable' : `${format(m.bitrateBps / 1000)} kb/s`}</dd></div>
       <div><dt>Negotiated codec</dt><dd>{m?.codec ?? 'unavailable'}</dd></div>
       <div><dt>{local ? 'SFU-reported loss (latest RTCP)' : 'Packet loss (sample interval)'}</dt><dd>{m?.lossPercent === undefined ? 'unavailable' : `${format(m.lossPercent)}%`}</dd></div>

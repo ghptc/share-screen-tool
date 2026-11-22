@@ -1,3 +1,4 @@
+import { applyVideoTarget, nativeTarget, type VideoTarget } from './videoQuality'
 import NativeAudio from './NativeAudio'
 import RemoteScreenAudio from './RemoteScreenAudio'
 import {ScreenTile, type Screen} from './ScreenTile'
@@ -8,7 +9,7 @@ import { ConnectionState, LocalAudioTrack, LocalVideoTrack, RoomEvent, Track, ty
 type Owned = { track: LocalVideoTrack; stream: MediaStream; ended: () => void; audio?: LocalAudioTrack; audioEnded?: () => void }
 export const captureOptions: DisplayMediaStreamOptions = {
   audio: false,
-  video: { width: { ideal: 2560 }, height: { ideal: 1440 }, frameRate: { ideal: 60 } },
+  video: { frameRate: { ideal: 60, max: 60 } },
 }
 
 function captureError(cause: unknown): string {
@@ -40,6 +41,19 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
   const [busy, setBusy] = useState<'' | 'starting' | 'stopping'>('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [quality, setQuality] = useState(nativeTarget)
+  const [qualityBusy, setQualityBusy] = useState(false)
+  async function changeQuality(target: VideoTarget) {
+    const active = owned.current
+    if (!active) { setQuality(target); return }
+    if (!active.track.sender || qualityBusy) return
+    setQualityBusy(true)
+    try {
+      await applyVideoTarget(active.track.sender, active.track.mediaStreamTrack.getSettings(), target)
+      if (owned.current === active) { setQuality(target); setError('') }
+    } catch { setError('This browser could not apply the live quality change. Your screen is still shared.') }
+    finally { setQualityBusy(false) }
+  }
   const [settings, setSettings] = useState<MediaTrackSettings | null>(null)
   const owned = useRef<Owned | null>(null)
   const busyRef = useRef(false)
@@ -196,7 +210,9 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
       if (!captureIsCurrent(ticket, raw)) {
         stopCapture(active); await unpublish(active); return
       }
-      setSettings(raw.getSettings()); setSharing(true)
+      const initialTarget = {fps: quality.fps, height: 0}
+      if (quality.fps !== 60 && track.sender) await applyVideoTarget(track.sender, raw.getSettings(), initialTarget)
+      setQuality(initialTarget); setSettings(raw.getSettings()); setSharing(true)
       setAudioStatus(!shareAudio ? 'Audio not requested.' : rawAudio ? 'Screen audio ended before publication. Video continues.' : offeredAudio
         ? 'Audio skipped because the browser could not confirm a tab with room audio excluded. On Linux, pair the native helper and select your game.'
         : 'Browser returned no screen audio. On Linux, pair the native helper and select your game.')
@@ -264,7 +280,8 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
   const screenSid = screens.find(screen => screen.local)?.publication.trackSid
   if (player) return <PlayerStage screens={screens} peers={audioPeers} connected={connected} sharing={sharing} busy={busy}
     screen={sharing ? screenSid : undefined} control={nativeAudioControl} canPublish={canPublish} error={error}
-    start={() => void start()} stop={() => void stop()} />
+    quality={quality} nativeSettings={settings ?? undefined} qualityBusy={qualityBusy || !!busy}
+    changeQuality={target => void changeQuality(target)} start={() => void start()} stop={() => void stop()} />
   return <div className="screen-sharing">
     <h3>Screens</h3>
     {canPublish ? <div className="share-controls">
@@ -274,7 +291,7 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
       {busy === 'stopping' && <p role="status">Stopping screen sharing…</p>}
       {busy === 'starting' && <><p role="status">Requesting or publishing your screen…</p><button onClick={() => { generation.current++; if (owned.current) stopCapture(owned.current); setNotice('Sharing request cancelled. Close any browser picker; pending selections will be discarded.') }}>Cancel sharing request</button></>}
     </div> : <p>Viewer mode. A separate publisher invitation is required to share a screen.</p>}
-    <p className="note">Requested capture target: 2560 × 1440 at 60 FPS. Actual capture and transmission may be lower. Audio is opt-in; only audio returned by the screen picker is used. Microphone capture is never requested.</p>
+    <p className="note">Requested capture target: native display dimensions at 60 FPS. Actual capture and transmission may be lower. Audio is opt-in; only audio returned by the screen picker is used. Microphone capture is never requested.</p>
     {canPublish && <p role="status" aria-label="Audio capture status">{audioStatus}</p>}
     {settings && <p className="note">Browser-reported capture settings at start: {settings.width ?? 'unknown'} × {settings.height ?? 'unknown'}, {settings.frameRate ?? 'unknown'} FPS. These are not measured transmission rates.</p>}
     {notice && <p role="status">{notice}</p>}
