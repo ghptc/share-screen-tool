@@ -39,7 +39,7 @@ The manual player starts a separate loopback frontend on port 5191, backend on 1
 
 ## Public-release blockers
 
-The backend accepts `WHITERUN_MEDIA_TRANSPORT=cloudflare-prototype` only on a loopback listener in the explicit development Discord simulator profile. Each backend instance selects one media transport. Production Discord continues to require the patched LiveKit admission path.
+The backend accepts `WHITERUN_MEDIA_TRANSPORT=cloudflare-prototype` only on a loopback listener in the explicit development Discord simulator profile. Each backend instance selects one media transport. A separate loopback-only `cloudflare-private` profile requires real Discord OAuth, an explicit pilot user list and voice-channel membership. The regular private Discord profile uses patched LiveKit. [Workers pilot deployment](cloudflare-private-player.md)
 
 ### Durable ownership and failure recovery
 
@@ -69,7 +69,7 @@ These commands use the configured SFU app, two generated videos and a simulated 
 | Controller and watchdog suspended | The receiver counted 10 video RTP packets in a one-second interval entirely after expiry. After resuming only the watchdog, closure was confirmed 2.133 s after expiry. |
 | Controller killed | Cloudflare confirmed closure after 566 ms. The replacement controller acquired ownership, and the receiver observed zero packets in the final one-second observation window. |
 
-The private-guild stack runs the patched LiveKit transport. Its copied room link returned HTTP 401 at the join endpoint. The real bot, configured guild/channel, registered slash command, callback and OAuth client passed private preflight. Discord REST returned 404 for the installed bot’s own voice state, and the real private Gateway authority returned 403 for that guild member with no voice connection. The human OAuth, wrong-channel and voice-departure exercise still needs confirmation. The hosted Cloudflare media tests below use a simulated Discord authority. Restrictive-network/TURN, real native-display FPS and physical HyperX listening remain separate acceptance checks.
+The private-guild stack runs the patched LiveKit transport. Its copied room link returned HTTP 401 at the join endpoint. The real bot, configured guild/channel, registered slash command, callback and OAuth client passed private preflight. Discord REST returned 404 for the installed bot’s own voice state, and the real private Gateway authority returned 403 for that guild member with no voice connection. A real Firefox user completed OAuth on the localhost private LiveKit stack and connected in the correct channel. Following a move, the old session returned 401 and a fresh OAuth admission and a reopened link both returned 403. The public-hostname pilot still needs a separate acceptance run. The hosted Cloudflare media tests below use a simulated Discord authority. Restrictive-network/TURN, real native-display FPS and physical HyperX listening remain separate acceptance checks.
 
 ## Native PipeWire audio
 

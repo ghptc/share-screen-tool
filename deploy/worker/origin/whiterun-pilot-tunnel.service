@@ -1,0 +1,13 @@
+[Unit]
+Description=Whiterun private Cloudflare tunnel
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/env cloudflared tunnel --no-autoupdate run --token-file %h/.config/whiterun-pilot/tunnel.token
+NoNewPrivileges=yes
+UMask=0077
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=default.target

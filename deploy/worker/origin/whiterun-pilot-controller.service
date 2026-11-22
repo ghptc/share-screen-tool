@@ -1,0 +1,23 @@
+[Unit]
+Description=Whiterun private Discord room controller
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Environment=WHITERUN_ENV=production DISCORD_MODE=discord WHITERUN_MEDIA_TRANSPORT=cloudflare-private
+Environment=BACKEND_ADDR=127.0.0.1:18492 DISCORD_VOICE_URL=http://127.0.0.1:18491
+Environment=WHITERUN_SFU_STATE_DIR=%h/.local/state/whiterun-pilot
+EnvironmentFile=%h/.config/whiterun-pilot/controller.env
+ExecStart=%h/.local/lib/whiterun-pilot/server
+StateDirectory=whiterun-pilot
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+# The ownership watchdog must keep running after controller shutdown or crash.
+KillMode=process
+TimeoutStopSec=50s
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=default.target
