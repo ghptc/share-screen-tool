@@ -1,0 +1,14 @@
+{
+  "name": "whiterun-private-player",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test worker.test.mjs",
+    "bundle": "wrangler deploy --dry-run"
+  },
+  "devDependencies": {
+    "miniflare": "5.20261119.0-beta",
+    "wrangler": "4.166.0"
+  }
+}
