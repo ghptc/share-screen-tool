@@ -74,3 +74,23 @@ test('same-origin admission passes the authenticated controller decision once', 
   assert.equal((await get(path, { ...options, headers: {Origin: 'https://another.example'} })).status, 403)
   assert.equal(requests.length, 5)
 })
+
+test('Access setup can expose only the shell before the pilot gets a private binding', async () => {
+  const { mkdtemp, copyFile, readFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { execFileSync } = await import('node:child_process')
+  const dir = await mkdtemp(join(tmpdir(), 'whiterun-config-'))
+  try {
+    for (const name of ['configure.mjs', 'wrangler.json']) await copyFile(new URL(name, import.meta.url), join(dir, name))
+    for (const stage of [undefined, '--access-setup', '--private-pilot']) {
+      const args = ['configure.mjs','pilot','00000000-0000-4000-8000-000000000001']
+      if (stage) args.push(stage)
+      execFileSync(process.execPath, args, { cwd: dir })
+      const config = JSON.parse(await readFile(join(dir, 'wrangler.private.json'), 'utf8'))
+      assert.equal(config.preview_urls, false)
+      assert.equal(config.workers_dev, Boolean(stage))
+      assert.equal(Boolean(config.vpc_services), stage !== '--access-setup')
+    }
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
