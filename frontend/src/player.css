@@ -25,13 +25,7 @@ main.player {
 .player button:hover { background: #ffffff12; }
 .player button:disabled { cursor: default; }
 .player :is(button, select, input):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-.player-header { position: absolute; z-index: 3; top: 0; left: 0; right: 0; display: flex; align-items: center; justify-content: space-between; padding: 22px clamp(16px, 3vw, 48px); pointer-events: none; background: linear-gradient(#08090bce, transparent); }
-.player-header h1 { font-size: 18px; font-weight: 650; display: inline-flex; align-items: center; gap: 5px; letter-spacing: -.055em; margin: 0; }
-.brand-secondary { font-weight: 400; color: #b2b1ba; }
-.brand-symbol { display: inline-flex; align-items: center; gap: 3px; margin-right: 6px; height: 25px; }
-.brand-symbol i { background: var(--accent); transform: skewX(-16deg); width: 4px; height: 12px; border-radius: 1px; }
-.brand-symbol i:nth-child(2) { height: 21px; }
-.brand-symbol i:nth-child(3) { height: 16px; }
+.player-header { position: absolute; z-index: 3; top: 0; left: 0; right: 0; display: flex; align-items: center; justify-content: flex-end; padding: 22px clamp(16px, 3vw, 48px); pointer-events: none; background: linear-gradient(#08090bce, transparent); }
 .connection { display: flex; align-items: center; gap: 8px; color: #b7b9bd; font-size: 12px; }
 .connection i { width: 6px; height: 6px; border-radius: 50%; background: #d4a26a; }
 .connection[data-connected="true"] i { background: #7ac5a1; }

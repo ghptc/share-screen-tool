@@ -29,7 +29,7 @@ test('expiry ends the player at 36,000 seconds and a reload of that entry makes 
   vi.stubGlobal('fetch', join)
   const player = render(<App />)
   expect(screen.getByRole('main', { name: 'Screen Share player' })).toBeInTheDocument()
-  expect(screen.getByRole('heading', { name: 'Screen Share', level: 1 })).toBeInTheDocument()
+  expect(screen.queryByRole('heading', { level: 1 })).toBeNull()
   await act(() => vi.advanceTimersByTimeAsync(0))
   expect(screen.getByText('Connected screen')).toBeInTheDocument()
   await act(() => vi.advanceTimersByTimeAsync(35_999_999))

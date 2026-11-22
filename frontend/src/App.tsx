@@ -135,14 +135,6 @@ function Player({ channel }: {channel?: string}) {
   return (
     <main className="player" aria-label="Screen Share player">
       <header className="player-header">
-        <h1>
-          <span className="brand-symbol" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-          </span>
-          Screen <span className="brand-secondary">Share</span>
-        </h1>
         <span className="connection" role="status" data-connected={state === 'Connected'}>
           <i />
           {state}

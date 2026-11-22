@@ -17,6 +17,8 @@ export async function frontend(context: BrowserContext, baseURL: string) {
     if (path === '/src/main.tsx') {
       const css = `${JSON.stringify(styles)}.forEach(href => { const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = href; document.head.appendChild(link); });\n`
       await route.fulfill({ status: 200, contentType: 'text/javascript', body: css + await readFile(new URL(`../dist${entry}`, import.meta.url), 'utf8') })
+    } else if (path === '/assets/screen-share-icon.png') {
+      await route.fulfill({ contentType: 'image/png', body: await readFile(new URL('../dist' + path, import.meta.url)) })
     } else if (/^\/assets\/[A-Za-z0-9_.-]+$/.test(path)) {
       await route.fulfill({ status: 200, contentType: path.endsWith('.css') ? 'text/css' : 'text/javascript', body: await readFile(new URL(`../dist${path}`, import.meta.url)) })
     } else await route.continue()
