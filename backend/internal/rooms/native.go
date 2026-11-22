@@ -173,6 +173,9 @@ func (a *API) claimNative(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, "Pairing code is invalid, expired, or its screen ended")
 		return
 	}
+	if !a.requireDiscordAdmission(w, r) {
+		return
+	}
 	lease := randomID(32)
 	a.nativeMu.Lock()
 	s := a.nativeSessions[found.ID]

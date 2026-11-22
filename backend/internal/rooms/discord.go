@@ -36,6 +36,7 @@ type channelAccess struct {
 	mu       sync.Mutex
 	active   map[string]roomAccess
 	client   *http.Client
+	probes   sync.Map // identity -> *atomic.Bool for the duration of a readiness request
 }
 
 func (a *API) RegisterDiscord(m *http.ServeMux, c *discord.Config) {
@@ -46,6 +47,9 @@ func (a *API) RegisterDiscord(m *http.ServeMux, c *discord.Config) {
 	m.Handle("POST /discord/{ref}/publish", a.guard(http.HandlerFunc(a.discordPublish)))
 	m.Handle("POST /discord/{ref}/stop", a.guard(http.HandlerFunc(a.discordPublish)))
 	m.HandleFunc("POST /internal/discord/admit", a.discordAdmit)
+	if !c.Fixture {
+		m.HandleFunc("GET /readyz", a.discordReady)
+	}
 	m.HandleFunc("GET /discord/signal/{identity}/rtc", a.discordSignal)
 	m.HandleFunc("GET /discord/signal/{identity}/rtc/{path...}", a.discordSignal)
 	if c.Fixture {
@@ -174,6 +178,9 @@ func (a *API) discordSignal(w http.ResponseWriter, r *http.Request) {
 	case "", "v1", "validate", "v1/validate":
 	default:
 		http.NotFound(w, r)
+		return
+	}
+	if !a.requireDiscordAdmission(w, r) {
 		return
 	}
 	token, err := a.discordToken(room, id, b)
@@ -367,6 +374,11 @@ func (a *API) discordAdmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := q.Identity
+	if q.Room == admissionProbeRoom {
+		a.recordAdmissionProbe(id)
+		fail(w, 403, "Admission denied")
+		return
+	}
 	helper := strings.HasPrefix(id, "native-audio-")
 	if helper {
 		a.nativeMu.Lock()
