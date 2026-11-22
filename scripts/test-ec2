@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import socket
 import ssl
 import subprocess
 import sys
@@ -112,6 +113,20 @@ services:
                 time.sleep(1)
         else:
             raise RuntimeError("local HTTP-01 issuance or IP SAN verification failed")
+        def leaf_certificate():
+            with socket.create_connection((player, 8443), timeout=3) as client:
+                with tls.wrap_socket(client, server_hostname=player) as secure:
+                    return secure.getpeercert(binary_form=True)
+        leaf = leaf_certificate()
+        run(["up", "-d", "--no-deps", "--force-recreate", "player"])
+        for _ in range(25):
+            try:
+                assert leaf_certificate() == leaf
+                break
+            except OSError:
+                time.sleep(0.2)
+        else:
+            raise RuntimeError("recreated edge did not restore the verified certificate")
         for path in ("/", "/player/join", "/api/internal/discord/admit", "/twirp", "/api/fixture/authorize"):
             assert request(player, 8443, tls, "GET", path)[0] == 404
         assert request(player, 8443, tls, "POST", "/api/discord/"+ref+"/join")[0] == 401
@@ -130,7 +145,7 @@ services:
         else:
             raise RuntimeError("backend did not recover liveness")
         assert run(ready, False).returncode
-        print("PASS: production port bindings, HTTP-01, IP TLS, OAuth callback, copied-link denial and SFU admission")
+        print("PASS: ports, HTTP-01, IP TLS across edge replacement, OAuth callback, copied-link denial and SFU admission")
     finally:
         run(["down", "--volumes"])
 
