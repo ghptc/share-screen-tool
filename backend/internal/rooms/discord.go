@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httputil"
@@ -16,11 +17,13 @@ import (
 	"github.com/ghptc/whiterun-live/backend/internal/discord"
 	"github.com/livekit/protocol/auth"
 	"github.com/livekit/protocol/livekit"
+	"github.com/twitchtv/twirp"
 )
 
 const discordTTL = 45 * time.Second
 
 type roomAccess struct {
+	controlHash                     [32]byte
 	session, ref, user, epoch, name string
 	until                           time.Time
 	publishing                      bool
@@ -127,7 +130,7 @@ func (a *API) discordJoin(w http.ResponseWriter, r *http.Request) {
 		fail(w, 429, "Room session limit reached")
 		return
 	}
-	d.active[identity] = roomAccess{session: s.ID, ref: ref, user: s.User, epoch: epoch, name: "Screen " + randomID(3), until: s.Until}
+	d.active[identity] = roomAccess{controlHash: sha256.Sum256([]byte(control)), session: s.ID, ref: ref, user: s.User, epoch: epoch, name: "Screen " + randomID(3), until: s.Until}
 	d.mu.Unlock()
 	a.nativeMu.Lock()
 	a.nativeOwners[sha256.Sum256([]byte(control))] = nativeOwner{room, identity, s.Until}
@@ -222,10 +225,32 @@ func (a *API) validDiscord(ctx context.Context, room, id string) (roomAccess, bo
 	}
 	_, sessionOK := d.oauth.Session(b.session)
 	if !sessionOK || d.epoch(ctx, b.ref, b.user) != b.epoch {
-		d.oauth.Revoke(b.session)
 		d.mu.Lock()
+		_, registered := d.active[id]
 		delete(d.active, id)
 		d.mu.Unlock()
+		if registered {
+			d.oauth.Revoke(b.session)
+			a.nativeMu.Lock()
+			delete(a.nativeOwners, b.controlHash)
+			var helpers []string
+			for sid, s := range a.nativeSessions {
+				if s.Owner.Identity == id && s.Owner.Room == room && !s.Revoked {
+					helpers = append(helpers, sid)
+				}
+			}
+			a.nativeMu.Unlock()
+			go func() {
+				for _, sid := range helpers {
+					a.revokeNative(sid)
+				}
+				c, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+				defer cancel()
+				if admin, err := a.nativeContext(c, room); err == nil {
+					_, _ = a.client.RemoveParticipant(admin, &livekit.RoomParticipantIdentity{Room: room, Identity: id})
+				}
+			}()
+		}
 		return roomAccess{}, false
 	}
 	d.mu.Lock()
@@ -268,6 +293,32 @@ func (a *API) discordPublish(w http.ResponseWriter, r *http.Request) {
 	}
 	d.updateMu.Lock()
 	defer d.updateMu.Unlock()
+	if publish {
+		participants, err := a.client.ListParticipants(ctx, &livekit.ListParticipantsRequest{Room: owner.Room})
+		if err != nil {
+			fail(w, 503, "Room presence unavailable")
+			return
+		}
+		occupied := map[string]bool{}
+		for _, p := range participants.Participants {
+			for _, track := range p.Tracks {
+				if track.Type == livekit.TrackType_VIDEO && track.Source == livekit.TrackSource_SCREEN_SHARE {
+					occupied[p.Identity] = true
+				}
+			}
+		}
+		d.mu.Lock()
+		for id, res := range d.active {
+			if res.ref == b.ref && res.publishing {
+				occupied[id] = true
+			}
+		}
+		d.mu.Unlock()
+		if len(occupied) >= 4 && !occupied[owner.Identity] {
+			fail(w, 409, "All four screens are in use. You can keep watching.")
+			return
+		}
+	}
 	d.mu.Lock()
 	b, ok = d.active[owner.Identity]
 	if ok {
@@ -357,19 +408,24 @@ func (a *API) ReconcileDiscord(ctx context.Context) {
 		for id, b := range snapshot {
 			room := "dc-" + b.ref
 			valid, ok := a.validDiscord(ctx, room, id)
+			if !ok || !valid.publishing || a.now().Sub(valid.started) < 20*time.Second {
+				continue
+			}
 			admin, err := a.nativeContext(ctx, room)
 			if err != nil {
 				continue
 			}
-			if !ok {
-				a.client.RemoveParticipant(admin, &livekit.RoomParticipantIdentity{Room: room, Identity: id})
-				continue
-			}
-			if !valid.publishing || a.now().Sub(valid.started) < 20*time.Second {
-				continue
-			}
 			p, err := a.client.GetParticipant(admin, &livekit.RoomParticipantIdentity{Room: room, Identity: id})
 			if err != nil {
+				var upstream twirp.Error
+				if errors.As(err, &upstream) && upstream.Code() == twirp.NotFound {
+					d.mu.Lock()
+					if cur, ok := d.active[id]; ok && cur == valid {
+						cur.publishing = false
+						d.active[id] = cur
+					}
+					d.mu.Unlock()
+				}
 				continue
 			}
 			screen := false

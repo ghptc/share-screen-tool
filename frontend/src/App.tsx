@@ -133,6 +133,7 @@ export default function App() {
   const url = new URL(window.location.href)
   const channel = /^\/r\/([A-Za-z0-9_-]{32})$/.exec(url.pathname)
   if(channel) return <Player channel={channel[1]} />
+  if(url.pathname.startsWith('/r/')) return <main className="player"><div className="player-empty" role="alert">Room link unavailable.</div></main>
   const invitation = ['room', 'invite', 'publish'].some(
     (k) => url.searchParams.has(k) || new URLSearchParams(url.hash.slice(1)).has(k),
   )

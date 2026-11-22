@@ -72,7 +72,7 @@ index a67adf7..963c719 100644
 @@ -93,0 +94 @@ type Room struct {
 +	ScreenSlots ScreenSlots
 diff --git a/pkg/service/roommanager.go b/pkg/service/roommanager.go
-index 6a70c6b..b7ecdda 100644
+index 6a70c6b..645b6f6 100644
 --- a/pkg/service/roommanager.go
 +++ b/pkg/service/roommanager.go
 @@ -328,0 +329,3 @@ func (r *RoomManager) StartSession(
@@ -90,7 +90,7 @@ index 6a70c6b..b7ecdda 100644
 +				if p.IsClosed() {
 +					return
 +				}
-+				if !voiceAuthorized(context.Background(), roomName, string(p.Identity()), nil) {
++				if !voiceAuthorized(context.Background(), roomName, string(p.Identity()), p.ClaimGrants().Video) {
 +					p.Close(true, types.ParticipantCloseReasonServiceRequestRemoveParticipant, false)
 +					return
 +				}

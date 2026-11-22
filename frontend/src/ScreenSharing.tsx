@@ -35,7 +35,7 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, ch
     if (!channel) return
     const response = await fetch('/api/discord/'+channel+(enabled?'/publish':'/stop'), {method:'POST',
       headers:{'Content-Type':'application/json',Authorization:'Bearer '+nativeAudioControl}, body:'{}',keepalive:!enabled, signal:AbortSignal.timeout(6000)})
-    if (!response.ok) throw new Error('Screen publication requires current voice-channel membership.')
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'Screen publication requires current voice-channel membership.')
   }
   const [audioPeers, setAudioPeers] = useState<{ identity: string; owner: string; publication?: TrackPublication; publisherIdentity?: string }[]>([])
   const [nativeStatus, setNativeStatus] = useState('Native helper not connected.')
