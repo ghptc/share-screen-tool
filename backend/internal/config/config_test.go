@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 func TestLoad(t *testing.T) {
 	t.Setenv("LOCAL_ADMIN_KEY", "test-operator-key-at-least-32-characters")
@@ -83,5 +86,36 @@ func TestRealDiscordRequiresSecureMediaAndHasNoLocalOperator(t *testing.T) {
 	t.Setenv("LIVEKIT_WS_URL", "wss://media.test")
 	if _, err := Load(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestServiceEnvironmentAliases(t *testing.T) {
+	for _, suffix := range []string{"ENV", "MEDIA_TRANSPORT", "SFU_STATE_DIR"} {
+		t.Run(suffix, func(t *testing.T) {
+			old, current := "WHITERUN_"+suffix, "SCREEN_SHARE_"+suffix
+			t.Setenv(old, "existing-value")
+			t.Setenv(current, "")
+			if err := os.Unsetenv(current); err != nil {
+				t.Fatal(err)
+			}
+			if err := ApplyLegacyEnvironment(suffix); err != nil || os.Getenv(current) != "existing-value" {
+				t.Fatal("legacy setting not inherited")
+			}
+			if err := ApplyLegacyEnvironment(suffix); err != nil {
+				t.Fatal("matching aliases rejected")
+			}
+			for _, value := range []string{"", "different"} {
+				t.Setenv(current, value)
+				if err := ApplyLegacyEnvironment(suffix); err == nil {
+					t.Fatal("ambiguous settings accepted")
+				}
+			}
+			if err := os.Unsetenv(old); err != nil {
+				t.Fatal(err)
+			}
+			if err := ApplyLegacyEnvironment(suffix); err != nil || os.Getenv(current) != "different" {
+				t.Fatal("canonical setting not retained")
+			}
+		})
 	}
 }

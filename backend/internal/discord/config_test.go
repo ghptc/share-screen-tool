@@ -7,8 +7,8 @@ import (
 
 func TestPrivatePilotConfig(t *testing.T) {
 	t.Setenv("DISCORD_MODE", "discord")
-	t.Setenv("WHITERUN_ENV", "production")
-	t.Setenv("WHITERUN_MEDIA_TRANSPORT", "cloudflare-private")
+	t.Setenv("SCREEN_SHARE_ENV", "production")
+	t.Setenv("SCREEN_SHARE_MEDIA_TRANSPORT", "cloudflare-private")
 	t.Setenv("DISCORD_CLIENT_ID", "100000000000000001")
 	t.Setenv("DISCORD_CHANNELS", "12/34")
 	t.Setenv("DISCORD_VOICE_URL", "http://localhost:8091")
@@ -30,11 +30,11 @@ func TestPrivatePilotConfig(t *testing.T) {
 
 func TestSimulatorCannotRunInProduction(t *testing.T) {
 	t.Setenv("DISCORD_MODE", "simulator")
-	t.Setenv("WHITERUN_ENV", "production")
+	t.Setenv("SCREEN_SHARE_ENV", "production")
 	if _, err := Load("http://localhost:5173", "devkey", "secret", ""); err == nil {
 		t.Fatal("production simulator accepted")
 	}
-	t.Setenv("WHITERUN_ENV", "development")
+	t.Setenv("SCREEN_SHARE_ENV", "development")
 	if _, err := Load("https://live.example", "devkey", "secret", ""); err == nil {
 		t.Fatal("non-loopback simulator accepted")
 	}
@@ -46,7 +46,7 @@ func TestSimulatorCannotRunInProduction(t *testing.T) {
 
 func TestDiscordOAuthSecretCannotSignMedia(t *testing.T) {
 	t.Setenv("DISCORD_MODE", "discord")
-	t.Setenv("WHITERUN_ENV", "production")
+	t.Setenv("SCREEN_SHARE_ENV", "production")
 	t.Setenv("DISCORD_CLIENT_ID", "1234")
 	t.Setenv("DISCORD_CHANNELS", "12/34")
 	t.Setenv("DISCORD_VOICE_URL", "http://localhost:8091")
@@ -61,7 +61,7 @@ func TestDiscordOAuthSecretCannotSignMedia(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, env := range []string{"", "development", "prodution"} {
-		t.Setenv("WHITERUN_ENV", env)
+		t.Setenv("SCREEN_SHARE_ENV", env)
 		if _, err := Load(origin, "livekit-private", strings.Repeat("e", 32), ""); err == nil || PrivateProfile() {
 			t.Fatal("real provider accepted outside its explicit profile")
 		}

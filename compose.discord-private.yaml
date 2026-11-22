@@ -20,6 +20,7 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     environment:
+      SCREEN_SHARE_ENV: production
       WHITERUN_ENV: production
       DISCORD_MODE: discord
       APP_ORIGIN: https://${DISCORD_PRIVATE_HOST:-localhost}:8443
@@ -48,6 +49,7 @@ services:
     build: *backend_build
     entrypoint: ["/discord-bot"]
     environment:
+      SCREEN_SHARE_ENV: production
       WHITERUN_ENV: production
       DISCORD_MODE: discord
       APP_ORIGIN: https://${DISCORD_PRIVATE_HOST:-localhost}:8443

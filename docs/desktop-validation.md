@@ -40,13 +40,13 @@ For each **remote** tile, expand **Runtime diagnostics**. Allow at least two two
 This optional DevTools procedure affects only that page's SFU WebSocket. It does not modify application permissions, media, or browser policy. Install it **before joining** in one validation window (reload that window first if already connected). Leave the other participant connected.
 
 ```js
-window.whiterunValidationSockets = [];
+window.screenShareValidationSockets = [];
 const NativeWebSocket = window.WebSocket;
 window.WebSocket = class extends NativeWebSocket {
   constructor(url, protocols) {
     super(url, ...(protocols === undefined ? [] : [protocols]));
     if (new URL(url, location.href).port === '7880') {
-      window.whiterunValidationSockets.push(this);
+      window.screenShareValidationSockets.push(this);
     }
   }
 };
@@ -55,7 +55,7 @@ window.WebSocket = class extends NativeWebSocket {
 Join, start sharing, and approve the normal picker. After both streams are playing, run:
 
 ```js
-window.whiterunValidationSockets.at(-1)?.close(4000, 'Manual signaling interruption');
+window.screenShareValidationSockets.at(-1)?.close(4000, 'Manual signaling interruption');
 ```
 
 Observe a reconnecting state followed by connected, with the existing capture still live and no new picker. Verify new decoded frames after recovery. This tests signaling interruption; it does not establish behavior after prolonged network loss or SFU process failure. Reloading the page removes the instrumentation. Do not save socket URLs or tokens in the results.

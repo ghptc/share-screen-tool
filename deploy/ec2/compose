@@ -15,6 +15,6 @@ info = config.lstat()
 if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
     sys.exit("Protect shared/production.env with mode 0600 and run as its owner")
 env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG", "TERM", "XDG_RUNTIME_DIR") if k in os.environ}
-env["WHITERUN_RELEASE"] = revision
+env["SCREEN_SHARE_RELEASE"] = revision
 os.execvpe("docker", ["docker", "compose", "--env-file", str(config), "-p", "whiterun-live-prod",
                      "-f", str(release / "compose.yaml"), *sys.argv[1:]], env)

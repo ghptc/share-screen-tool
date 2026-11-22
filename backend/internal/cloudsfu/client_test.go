@@ -105,13 +105,13 @@ func TestSecretBoundary(t *testing.T) {
 }
 
 func TestPrototypeProfile(t *testing.T) {
-	t.Setenv("WHITERUN_MEDIA_TRANSPORT", "cloudflare-prototype")
-	t.Setenv("WHITERUN_ENV", "production")
+	t.Setenv("SCREEN_SHARE_MEDIA_TRANSPORT", "cloudflare-prototype")
+	t.Setenv("SCREEN_SHARE_ENV", "production")
 	t.Setenv("DISCORD_MODE", "discord")
 	if _, err := PrototypeEnabled("127.0.0.1:8080", false); err == nil {
 		t.Fatal("production enabled")
 	}
-	t.Setenv("WHITERUN_ENV", "development")
+	t.Setenv("SCREEN_SHARE_ENV", "development")
 	t.Setenv("DISCORD_MODE", "simulator")
 	if _, err := PrototypeEnabled("0.0.0.0:8080", true); err == nil {
 		t.Fatal("nonloopback enabled")
@@ -122,9 +122,9 @@ func TestPrototypeProfile(t *testing.T) {
 }
 
 func TestPrivatePilotProfile(t *testing.T) {
-	t.Setenv("WHITERUN_MEDIA_TRANSPORT", "cloudflare-private")
+	t.Setenv("SCREEN_SHARE_MEDIA_TRANSPORT", "cloudflare-private")
 	t.Setenv("DISCORD_MODE", "discord")
-	t.Setenv("WHITERUN_ENV", "production")
+	t.Setenv("SCREEN_SHARE_ENV", "production")
 	t.Setenv("DISCORD_PILOT_USERS", "")
 	if _, err := PrototypeEnabled("127.0.0.1:8080", false); err == nil {
 		t.Fatal("private pilot requires testers")

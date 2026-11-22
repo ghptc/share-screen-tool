@@ -54,14 +54,14 @@ def run_player(provider):
                 probe.bind(("127.0.0.1", port))
             except OSError:
                 raise SystemExit(f"Port {port} is already in use") from None
-    shared = {**TOOLS, "APP_ORIGIN": origin, "WHITERUN_ENV": "development", "DISCORD_MODE": "simulator",
+    shared = {**TOOLS, "APP_ORIGIN": origin, "SCREEN_SHARE_ENV": "development", "DISCORD_MODE": "simulator",
               "DISCORD_CHANNELS": "2001/3001", "DISCORD_CLIENT_ID": "fixture",
               **{k: secrets.token_hex(32) for k in ("DISCORD_CLIENT_SECRET", "DISCORD_VOICE_KEY", "DISCORD_ROOM_KEY")}}
     fixture = {**shared, "DISCORD_FIXTURE_ADDR": voice, "DISCORD_FIXTURE_KEY": secrets.token_hex(32)}
-    api = {**shared, **provider, "BACKEND_ADDR": backend, "WHITERUN_SFU_STATE_DIR": str(ROOT / ".local-player" / "cloudflare-ownership"), "DISCORD_VOICE_URL": "http://" + voice,
-           "WHITERUN_MEDIA_TRANSPORT": "cloudflare-prototype", "DISCORD_ADMISSION_KEY": secrets.token_hex(32),
+    api = {**shared, **provider, "BACKEND_ADDR": backend, "SCREEN_SHARE_SFU_STATE_DIR": str(ROOT / ".local-player" / "cloudflare-ownership"), "DISCORD_VOICE_URL": "http://" + voice,
+           "SCREEN_SHARE_MEDIA_TRANSPORT": "cloudflare-prototype", "DISCORD_ADMISSION_KEY": secrets.token_hex(32),
            "LOCAL_ADMIN_KEY": secrets.token_hex(32)}
-    with tempfile.TemporaryDirectory(prefix="whiterun-sfu-") as temp:
+    with tempfile.TemporaryDirectory(prefix="screen-share-sfu-") as temp:
         for name in ("server", "discord-fixture"):
             subprocess.run(["go", "build", "-o", f"{temp}/{name}", f"./cmd/{name}"],
                            cwd=ROOT / "backend", env=TOOLS, check=True)
@@ -131,7 +131,7 @@ def main():
         return
     subprocess.run(["npm", "run", "build"], cwd=ROOT / "frontend", env=TOOLS, check=True)
     mode = "loopback" if args.mode == "test-local" else "cloudflare"
-    with tempfile.TemporaryDirectory(prefix="wl-helper-") as temp:
+    with tempfile.TemporaryDirectory(prefix="screen-share-helper-") as temp:
         extra = {"WHITERUN_SFU_BROWSER_EXPIRY": "1"} if args.mode == "test-video-expiry" else {}
         if args.mode == "test-hosted-audio":
             helper = str(Path(temp) / "audio-helper")

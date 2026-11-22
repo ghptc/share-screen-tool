@@ -35,7 +35,8 @@ function localRoom() {
   return new URL('/r/' + room, origin)
 }
 async function run() {
-  const link = process.env.WHITERUN_TEST_ROOM_URL ? new URL(process.env.WHITERUN_TEST_ROOM_URL) : localRoom()
+  const hostedRoom = process.env.SCREEN_SHARE_TEST_ROOM_URL ?? process.env.WHITERUN_TEST_ROOM_URL
+  const link = hostedRoom ? new URL(hostedRoom) : localRoom()
   if (link.protocol !== 'https:' || link.username || link.password || link.search || link.hash ||
       !/^\/r\/[A-Za-z0-9_-]{32}$/.test(link.pathname)) throw Error('Expected a private HTTPS room link')
   const { origin } = link

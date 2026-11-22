@@ -13,7 +13,7 @@ services:
     <<: *runtime
     cpus: 2.0
     mem_limit: 2g
-    image: whiterun-live/sfu:${WHITERUN_RELEASE:?WHITERUN_RELEASE}
+    image: whiterun-live/sfu:${SCREEN_SHARE_RELEASE:-${WHITERUN_RELEASE:?set SCREEN_SHARE_RELEASE}}
     pull_policy: never
     command: ["--config", "/etc/livekit.yaml"]
     configs:
@@ -31,10 +31,11 @@ services:
     <<: *runtime
     cpus: 0.50
     mem_limit: 256m
-    image: whiterun-live/backend:${WHITERUN_RELEASE}
+    image: whiterun-live/backend:${SCREEN_SHARE_RELEASE:-${WHITERUN_RELEASE}}
     pull_policy: never
     read_only: true
     environment:
+      SCREEN_SHARE_ENV: production
       WHITERUN_ENV: production
       DISCORD_MODE: discord
       APP_ORIGIN: https://${PUBLIC_IPV4}:8443
@@ -60,11 +61,12 @@ services:
     <<: *runtime
     cpus: 0.25
     mem_limit: 128m
-    image: whiterun-live/backend:${WHITERUN_RELEASE}
+    image: whiterun-live/backend:${SCREEN_SHARE_RELEASE:-${WHITERUN_RELEASE}}
     pull_policy: never
     read_only: true
     entrypoint: ["/discord-bot"]
     environment:
+      SCREEN_SHARE_ENV: production
       WHITERUN_ENV: production
       DISCORD_MODE: discord
       APP_ORIGIN: https://${PUBLIC_IPV4}:8443
@@ -79,7 +81,7 @@ services:
     <<: *runtime
     cpus: 0.50
     mem_limit: 256m
-    image: whiterun-live/player:${WHITERUN_RELEASE}
+    image: whiterun-live/player:${SCREEN_SHARE_RELEASE:-${WHITERUN_RELEASE}}
     pull_policy: never
     environment:
       PUBLIC_IPV4: ${PUBLIC_IPV4}

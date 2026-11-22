@@ -19,7 +19,29 @@ type Config struct {
 	AppOrigin      string
 }
 
+// ApplyLegacyEnvironment lets existing installations use the same binary during cutover.
+func ApplyLegacyEnvironment(names ...string) error {
+	for _, name := range names {
+		canonical, legacy := "SCREEN_SHARE_"+name, "WHITERUN_"+name
+		old, hasOld := os.LookupEnv(legacy)
+		if !hasOld {
+			continue
+		}
+		if current, set := os.LookupEnv(canonical); set {
+			if current != old {
+				return fmt.Errorf("%s conflicts with %s", canonical, legacy)
+			}
+		} else if err := os.Setenv(canonical, old); err != nil {
+			return fmt.Errorf("cannot initialize %s", canonical)
+		}
+	}
+	return nil
+}
+
 func Load() (Config, error) {
+	if err := ApplyLegacyEnvironment("ENV", "MEDIA_TRANSPORT", "SFU_STATE_DIR"); err != nil {
+		return Config{}, err
+	}
 	c := Config{Addr: value("BACKEND_ADDR", "127.0.0.1:8080"), LiveKitURL: value("LIVEKIT_HTTP_URL", "http://127.0.0.1:7880")}
 	if _, _, err := net.SplitHostPort(c.Addr); err != nil {
 		return Config{}, fmt.Errorf("BACKEND_ADDR: %w", err)
@@ -46,7 +68,7 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("%s must be a valid origin", v.name)
 		}
 	}
-	if os.Getenv("WHITERUN_MEDIA_TRANSPORT") == "cloudflare-private" {
+	if os.Getenv("SCREEN_SHARE_MEDIA_TRANSPORT") == "cloudflare-private" {
 		c.APIKey, c.APISecret = "", ""
 	} else if os.Getenv("DISCORD_MODE") == "discord" && !strings.HasPrefix(c.WSURL, "wss://") {
 		return Config{}, fmt.Errorf("Discord native media requires a TLS-protected LIVEKIT_WS_URL")

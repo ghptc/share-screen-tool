@@ -63,7 +63,7 @@ func main() {
 			os.Exit(1)
 		}
 		recovery, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-		guard, err := cloudsfu.StartGuard(recovery, os.Getenv("WHITERUN_SFU_STATE_DIR"), media)
+		guard, err := cloudsfu.StartGuard(recovery, os.Getenv("SCREEN_SHARE_SFU_STATE_DIR"), media)
 		cancel()
 		if err != nil {
 			logger.Error("cannot establish durable SFU ownership", "error", err)

@@ -11,6 +11,10 @@ func TestChannelRoomMapping(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// This reference was issued by the original production mapping.
+	if got, _ := d.Reference(Channel{"123", "456"}); got != "pRAx4xCcPEV0u2Ns6a9h_z6wFwLRglHN" {
+		t.Fatal("existing room link changed")
+	}
 	again, _ := NewDirectory(key, "124/456,123/457,123/456")
 	seen := map[string]bool{}
 	for _, ch := range []Channel{{"123", "456"}, {"124", "456"}, {"123", "457"}} {

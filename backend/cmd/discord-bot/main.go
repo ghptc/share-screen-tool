@@ -15,12 +15,16 @@ import (
 	"time"
 
 	dg "github.com/bwmarrin/discordgo"
+	"github.com/ghptc/whiterun-live/backend/internal/config"
 	"github.com/ghptc/whiterun-live/backend/internal/discord"
 )
 
 func main() {
+	if err := config.ApplyLegacyEnvironment("ENV"); err != nil {
+		log.Fatal(err)
+	}
 	if !discord.PrivateProfile() {
-		log.Fatal("real Discord bot requires WHITERUN_ENV=production and DISCORD_MODE=discord")
+		log.Fatal("real Discord bot requires SCREEN_SHARE_ENV=production and DISCORD_MODE=discord")
 	}
 	dir, err := discord.NewDirectory(os.Getenv("DISCORD_ROOM_KEY"), os.Getenv("DISCORD_CHANNELS"))
 	if err != nil {

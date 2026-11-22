@@ -6,6 +6,7 @@ services:
       DISCORD_ADMISSION_KEY: ${DISCORD_ADMISSION_KEY:?Set a unique SFU admission key}
   backend:
     environment:
+      SCREEN_SHARE_ENV: development
       WHITERUN_ENV: development
       DISCORD_MODE: simulator
       APP_ORIGIN: ${APP_ORIGIN:-http://localhost:5173}
@@ -22,6 +23,7 @@ services:
       dockerfile: backend/Dockerfile
     entrypoint: ["/discord-fixture"]
     environment:
+      SCREEN_SHARE_ENV: development
       WHITERUN_ENV: development
       DISCORD_MODE: simulator
       APP_ORIGIN: ${APP_ORIGIN:-http://localhost:5173}

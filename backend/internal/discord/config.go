@@ -20,7 +20,7 @@ type Config struct {
 // Production provider origins cannot be overridden through the environment.
 func Load(origin, lkKey, lkSecret, playerKey string) (*Config, error) {
 	mode := os.Getenv("DISCORD_MODE")
-	env := os.Getenv("WHITERUN_ENV")
+	env := os.Getenv("SCREEN_SHARE_ENV")
 	if mode == "" && (env == "" || env == "development") {
 		return nil, nil
 	}
@@ -32,7 +32,7 @@ func Load(origin, lkKey, lkSecret, playerKey string) (*Config, error) {
 	if (!mock && !PrivateProfile()) || (mock && (env != "development" || u.Scheme != "http" || u.Hostname() != "localhost")) {
 		return nil, errors.New("invalid Discord mode for this deployment")
 	}
-	pilot := os.Getenv("WHITERUN_MEDIA_TRANSPORT") == "cloudflare-private"
+	pilot := os.Getenv("SCREEN_SHARE_MEDIA_TRANSPORT") == "cloudflare-private"
 	if !mock && (u.Scheme != "https" || playerKey != "" || (!pilot && (lkKey == "devkey" || len(lkSecret) < 32))) {
 		return nil, errors.New("Discord requires HTTPS, private LiveKit keys and the workstation gateway disabled")
 	}
@@ -88,7 +88,7 @@ func Load(origin, lkKey, lkSecret, playerKey string) (*Config, error) {
 }
 
 func PrivateProfile() bool {
-	return os.Getenv("WHITERUN_ENV") == "production" && os.Getenv("DISCORD_MODE") == "discord"
+	return os.Getenv("SCREEN_SHARE_ENV") == "production" && os.Getenv("DISCORD_MODE") == "discord"
 }
 
 // IndependentCredentials protects against accidentally giving an unrelated

@@ -39,7 +39,7 @@ The manual player starts a separate loopback frontend on port 5191, backend on 1
 
 ## Public-release blockers
 
-The backend accepts `WHITERUN_MEDIA_TRANSPORT=cloudflare-prototype` only on a loopback listener in the explicit development Discord simulator profile. Each backend instance selects one media transport. A separate loopback-only `cloudflare-private` profile requires real Discord OAuth, an explicit pilot user list and voice-channel membership. The regular private Discord profile uses patched LiveKit. [Workers pilot deployment](cloudflare-private-player.md)
+The backend accepts `SCREEN_SHARE_MEDIA_TRANSPORT=cloudflare-prototype` only on a loopback listener in the explicit development Discord simulator profile. Each backend instance selects one media transport. A separate loopback-only `cloudflare-private` profile requires real Discord OAuth, an explicit pilot user list and voice-channel membership. The regular private Discord profile uses patched LiveKit. [Workers pilot deployment](cloudflare-private-player.md)
 
 ### Durable ownership and failure recovery
 

@@ -1,20 +1,25 @@
 package main
 
 import (
-	"github.com/ghptc/whiterun-live/backend/internal/discord"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"time"
+
+	"github.com/ghptc/whiterun-live/backend/internal/config"
+	"github.com/ghptc/whiterun-live/backend/internal/discord"
 )
 
 func main() {
+	if err := config.ApplyLegacyEnvironment("ENV"); err != nil {
+		log.Fatal(err)
+	}
 	origin := os.Getenv("APP_ORIGIN")
 	u, e := url.Parse(origin)
 	dir, err := discord.NewDirectory(os.Getenv("DISCORD_ROOM_KEY"), os.Getenv("DISCORD_CHANNELS"))
-	if os.Getenv("WHITERUN_ENV") != "development" || os.Getenv("DISCORD_MODE") != "simulator" || err != nil || e != nil || u.Scheme != "http" || u.Hostname() != "localhost" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+	if os.Getenv("SCREEN_SHARE_ENV") != "development" || os.Getenv("DISCORD_MODE") != "simulator" || err != nil || e != nil || u.Scheme != "http" || u.Hostname() != "localhost" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 		log.Fatal("development simulator configuration required")
 	}
 	c := &discord.Config{Fixture: true, Dir: dir, VoiceKey: os.Getenv("DISCORD_VOICE_KEY"), OAuthConfig: discord.OAuthConfig{Origin: origin, ClientID: os.Getenv("DISCORD_CLIENT_ID"), Secret: os.Getenv("DISCORD_CLIENT_SECRET")}}
