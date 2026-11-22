@@ -224,6 +224,22 @@ try {
   await Promise.all(pages.map((p) => p.getByRole('button', { name: 'Start sharing' }).click()))
   stage = 'remote playback'
   const results = await Promise.all(pages.map(measure))
+  if (!withAudio && !expiry) {
+    stage = 'live publishing quality'
+    const page = pages[0]
+    await page.getByRole('button', { name: 'Quality', exact: true }).click()
+    const fps = page.getByLabel('Publish FPS')
+    if (await fps.inputValue() !== '60' || await page.getByLabel('Publish resolution').inputValue() !== '0')
+      throw Error('Native quality default changed')
+    for (const target of [30, 60]) {
+      await fps.selectOption(String(target))
+      await page.waitForFunction(n => window.testPeers.some(pc => pc.getSenders().some(
+        s => s.track?.kind === 'video' && s.getParameters().encodings[0]?.maxFramerate === n
+      )), target, { timeout: 5000 })
+    }
+    if (await page.evaluate(() => window.captureCount !== 1)) throw Error('Quality reopened capture')
+    await page.getByRole('button', { name: 'Quality', exact: true }).click()
+  }
   let audio
   if (withAudio) {
     stage = 'hosted Opus reception'

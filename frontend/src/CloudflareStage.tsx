@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties } from 're
 import { publish, subscribe, type Signal } from './cloudflarePeer'
 import DesktopAudio from './DesktopAudio'
 import { readAudioPreference, writeAudioPreference } from './gameAudioSession'
-import { nativeTarget } from './videoQuality'
+import { applyVideoTarget, nativeTarget, type VideoTarget } from './videoQuality'
+import PublishQuality from './PublishQuality'
 
 type Flow = {
   audioFor?: string
@@ -137,6 +138,31 @@ export default function CloudflareStage({
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [focus, setFocus] = useState('')
+  const [qualityOpen, setQualityOpen] = useState(false)
+  const [quality, setQuality] = useState(nativeTarget)
+  const [qualityBusy, setQualityBusy] = useState(false)
+  const sender = useRef<RTCRtpSender | undefined>(undefined)
+  const selectedQuality = useRef(nativeTarget)
+  function selectQuality(value: VideoTarget) {
+    selectedQuality.current = value
+    setQuality(value)
+  }
+  async function changeQuality(value: VideoTarget) {
+    const current = sender.current
+    if (!current?.track) {
+      selectQuality(value)
+      return
+    }
+    setQualityBusy(true)
+    try {
+      await applyVideoTarget(current, current.track.getSettings(), value)
+      if (current === sender.current) selectQuality(value)
+    } catch {
+      if (current === sender.current) setMessage('This browser could not apply the quality change.')
+    } finally {
+      setQualityBusy(false)
+    }
+  }
   const start = useRef<() => void>(() => {})
   const stop = useRef<() => void>(() => {})
   const denied = useRef(onDenied)
@@ -193,6 +219,10 @@ export default function CloudflareStage({
       const flow = flows.get(key)
       if (!flow) return
       flows.delete(key)
+      if (key === local) {
+        sender.current = undefined
+        selectQuality({ fps: selectedQuality.current.fps, height: 0 })
+      }
       clearTimeout(flow.timeout)
       flow.pc.close()
       flow.stream?.getTracks().forEach((t) => t.stop())
@@ -258,6 +288,18 @@ export default function CloudflareStage({
         const [track] = stream.getVideoTracks()
         track.onended = () => remove(local)
         await publish(flow.pc, track, signal)
+        if (!active || flows.get(local) !== flow) return
+        sender.current = flow.pc.getSenders().find(s => s.track === track)
+        if (sender.current && selectedQuality.current.fps !== nativeTarget.fps) {
+          try {
+            await applyVideoTarget(sender.current, track.getSettings(), selectedQuality.current)
+          } catch {
+            if (flows.get(local) === flow) {
+              selectQuality(nativeTarget)
+              setMessage('This browser could not apply the selected frame rate.')
+            }
+          }
+        }
         refresh()
       } catch (e) {
         if (flows.get(local) === flow) {
@@ -371,6 +413,11 @@ export default function CloudflareStage({
       )}
       <div className="player-dock">
         {focused && <button onClick={() => setFocus('')}>Back to grid</button>}
+        <button aria-expanded={qualityOpen} onClick={() => setQualityOpen(!qualityOpen)}>Quality</button>
+        {qualityOpen && <div className="player-popover quality-menu" role="region" aria-label="Quality controls">
+          <PublishQuality value={quality} settings={sender.current?.track?.getSettings()}
+            busy={busy || qualityBusy} sharing={sharing} onChange={target => void changeQuality(target)} />
+        </div>}
         <button
           className="share-action"
           disabled={busy}

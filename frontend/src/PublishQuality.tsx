@@ -1,0 +1,21 @@
+import { resolutions, type VideoTarget } from './videoQuality'
+
+type Props = {
+  value: VideoTarget
+  settings?: MediaTrackSettings
+  busy: boolean
+  sharing: boolean
+  onChange: (value: VideoTarget) => void
+}
+
+export default function PublishQuality({ value, settings, busy, sharing, onChange }: Props) {
+  return <>
+    <label>Publish FPS <select value={value.fps} disabled={busy} onChange={e => onChange({...value, fps: Number(e.target.value)})}>
+      {[60, 30, 15].map(fps => <option key={fps}>{fps}</option>)}
+    </select></label>
+    <label>Publish resolution <select value={value.height} disabled={busy || !sharing} onChange={e => onChange({...value, height: Number(e.target.value)})}>
+      <option value={0}>Native</option>
+      {resolutions(settings).map(h => <option value={h} key={h}>{h}p</option>)}
+    </select></label>
+  </>
+}

@@ -5,7 +5,8 @@ import DesktopAudio from './DesktopAudio'
 import NativeAudio from './NativeAudio'
 import { readAudioPreference, writeAudioPreference } from './gameAudioSession'
 import MediaDiagnostics from './MediaDiagnostics'
-import { resolutions, type VideoTarget } from './videoQuality'
+import type { VideoTarget } from './videoQuality'
+import PublishQuality from './PublishQuality'
 import RemoteScreenAudio from './RemoteScreenAudio'
 
 function Icon({ name }: { name: 'share' | 'audio' | 'expand' | 'grid' | 'stop' }) {
@@ -239,14 +240,8 @@ export default function PlayerStage({
         {offer && sharing && audioEnabled && !menu && <button onClick={() => { setQualityOpen(false);setMenu(true) }}>Allow audio</button>}
         <button ref={qualityButton} aria-expanded={qualityOpen} aria-controls="player-quality" onClick={() => { setMenu(false); setQualityOpen(v => !v) }}>Quality</button>
         {qualityOpen && <div id="player-quality" className="player-popover quality-menu" role="region" aria-label="Quality controls" ref={qualityPanel}>
-          {canPublish && <>
-            <label>Publish FPS <select value={quality.fps} disabled={qualityBusy} onChange={e => changeQuality({...quality, fps: Number(e.target.value)})}>
-              {[60,30,15].map(fps => <option key={fps}>{fps}</option>)}
-            </select></label>
-            <label>Publish resolution <select value={quality.height} disabled={qualityBusy || !sharing} onChange={e => changeQuality({...quality, height: Number(e.target.value)})}>
-              <option value={0}>Native</option>{resolutions(nativeSettings).map(h => <option value={h} key={h}>{h}p</option>)}
-            </select></label>
-          </>}
+          {canPublish && <PublishQuality value={quality} settings={nativeSettings} busy={qualityBusy}
+            sharing={sharing} onChange={changeQuality} />}
           {screens.filter(s => !focused || s.key === focus || s.local).map(s => <div key={s.key}><strong>{s.owner}</strong>
             <MediaDiagnostics track={s.track} local={s.local} connected={connected} />
           </div>)}
