@@ -5,21 +5,19 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
-	"github.com/ghptc/whiterun-live/backend/internal/cloudsfu"
 	"io"
 	"log"
-	"path/filepath"
-
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
-
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/ghptc/whiterun-live/backend/internal/cloudsfu"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 )
@@ -137,13 +135,24 @@ func TestTwoBrowserMedia(t *testing.T) {
 	default:
 		t.Fatal("unknown media test mode")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	mux := http.NewServeMux()
 	server := httptest.NewUnstartedServer(mux)
 	origin := "https://" + server.Listener.Addr().String()
 	fixture := newCFFixture(t, origin, media)
 	mux.Handle("/api/", http.StripPrefix("/api", fixture.api))
+	browserTag := "sfu-audio-" + rand.Text()
+	var links func(bool) int
+	if helper := os.Getenv("WHITERUN_SFU_TEST_HELPER"); helper != "" {
+		if mode != "cloudflare" {
+			t.Fatal("hosted audio requires Cloudflare")
+		}
+		links = hostedDesktop(t, ctx, mux, fixture, helper, browserTag)
+		if links(false) != 0 {
+			t.Fatal("capture active before consent")
+		}
+	}
 	dist := "../../../frontend/dist"
 	if _, err := os.Stat(filepath.Join(dist, "index.html")); err != nil {
 		t.Fatal("build the frontend before running the browser test")
@@ -174,7 +183,7 @@ func TestTwoBrowserMedia(t *testing.T) {
 			cmd.Env = append(cmd.Env, name+"="+v)
 		}
 	}
-	data, _ := json.Marshal(map[string]any{"origin": server.URL, "cookies": cookies, "ref": fixture.ref, "hosted": mode == "cloudflare"})
+	data, _ := json.Marshal(map[string]any{"origin": server.URL, "cookies": cookies, "ref": fixture.ref, "hosted": mode == "cloudflare", "withAudio": links != nil, "browserTag": browserTag})
 	cmd.Stdin = strings.NewReader(string(data))
 	stream, err := cmd.StdoutPipe()
 	if err != nil {
@@ -188,7 +197,11 @@ func TestTwoBrowserMedia(t *testing.T) {
 	var report string
 	for scanner.Scan() {
 		line := scanner.Text()
-		if line == "switch-publisher-channel" {
+		if line == "audio-received" && links != nil {
+			if n := links(true); n != 2 {
+				t.Errorf("expected two isolated PipeWire links; observed %d", n)
+			}
+		} else if line == "switch-publisher-channel" {
 			fixture.voice(t, "33", "23")
 			switched = true
 		} else {
@@ -197,6 +210,14 @@ func TestTwoBrowserMedia(t *testing.T) {
 	}
 	if err = cmd.Wait(); err != nil || !switched {
 		t.Fatalf("browser media test failed: %s", report)
+	}
+	if links != nil {
+		for until := time.Now().Add(5 * time.Second); time.Now().Before(until) && links(false) != 0; {
+			time.Sleep(100 * time.Millisecond)
+		}
+		if links(false) != 0 {
+			t.Fatal("native capture survived departure")
+		}
 	}
 	t.Logf("%s %s", mode, report)
 }
