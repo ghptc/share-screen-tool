@@ -4,8 +4,6 @@ package main
 import (
 	"context"
 	"errors"
-	dg "github.com/bwmarrin/discordgo"
-	"github.com/ghptc/whiterun-live/backend/internal/discord"
 	"log"
 	"net/http"
 	"net/url"
@@ -15,6 +13,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	dg "github.com/bwmarrin/discordgo"
+	"github.com/ghptc/whiterun-live/backend/internal/discord"
 )
 
 func main() {
@@ -75,15 +76,13 @@ func main() {
 				failed()
 				return
 			}
-			if cmd, ok := e.Struct.(*dg.InteractionCreate); ok && cmd.Type == dg.InteractionApplicationCommand && cmd.ApplicationCommandData().Name == "live" && cmd.Member != nil && cmd.Member.User != nil {
+			if cmd, ok := e.Struct.(*dg.InteractionCreate); ok {
 				go func() {
-					p, ok := lookup(cmd.GuildID, cmd.Member.User.ID)
-					reply := discord.LiveReply(dir, origin, cmd.GuildID, p, ok)
-					data := &dg.InteractionResponseData{Content: reply, AllowedMentions: &dg.MessageAllowedMentions{}}
-					if !strings.HasPrefix(reply, "Watch or share:") {
-						data.Flags = dg.MessageFlagsEphemeral
+					reply := liveCommand(cmd.Interaction, dir, origin, lookup)
+					if reply == nil {
+						return
 					}
-					if err := s.InteractionRespond(cmd.Interaction, &dg.InteractionResponse{Type: dg.InteractionResponseChannelMessageWithSource, Data: data}); err != nil {
+					if err := s.InteractionRespond(cmd.Interaction, reply); err != nil {
 						log.Print("command response failed")
 					}
 				}()
@@ -116,4 +115,25 @@ func main() {
 		case <-time.After(5 * time.Second):
 		}
 	}
+}
+
+func liveCommand(i *dg.Interaction, dir *discord.Directory, origin string, lookup func(string, string) (discord.Presence, bool)) *dg.InteractionResponse {
+	if i == nil || i.Type != dg.InteractionApplicationCommand {
+		return nil
+	}
+	command, ok := i.Data.(dg.ApplicationCommandInteractionData)
+	if !ok || command.Name != "live" {
+		return nil
+	}
+	var presence discord.Presence
+	var present bool
+	if i.GuildID != "" && i.Member != nil && i.Member.User != nil {
+		presence, present = lookup(i.GuildID, i.Member.User.ID)
+	}
+	link := discord.LiveReply(dir, origin, i.GuildID, presence, present)
+	data := &dg.InteractionResponseData{Content: link, AllowedMentions: &dg.MessageAllowedMentions{}}
+	if !strings.HasPrefix(link, "Watch or share:") {
+		data.Flags = dg.MessageFlagsEphemeral
+	}
+	return &dg.InteractionResponse{Type: dg.InteractionResponseChannelMessageWithSource, Data: data}
 }
