@@ -171,7 +171,8 @@ func run() (runErr error) {
 		if err != nil {
 			return err
 		}
-		if *instance != "" && coreInstance(graph) != *instance {
+		core := coreInstance(graph)
+		if core == "" || (*instance != "" && core != *instance) {
 			return errors.New("selected PipeWire instance ended")
 		}
 		selected, err := selectApplication(graph, *application)
@@ -182,7 +183,8 @@ func run() (runErr error) {
 			return err
 		}
 		name := fmt.Sprintf("whiterun-capture-%x", rand.Text())
-		tap = &applicationTap{core: *instance, sourceSerial: *application, sourceID: selected.ID, captureName: name}
+		// A manual pairing can wait at stdin while PipeWire restarts and reuses a serial.
+		tap = &applicationTap{core: core, sourceSerial: *application, sourceID: selected.ID, captureName: name}
 		serial = strconv.FormatUint(*application, 10)
 	} else {
 		if !*mixedMonitor {
