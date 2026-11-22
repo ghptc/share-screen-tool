@@ -25,7 +25,7 @@ func main() {
 	}
 	token, key, origin := os.Getenv("DISCORD_BOT_TOKEN"), os.Getenv("DISCORD_VOICE_KEY"), os.Getenv("APP_ORIGIN")
 	u, err := url.Parse(origin)
-	if token == "" || len(key) < 32 || err != nil || u.Host == "" || u.User != nil || u.Scheme != "https" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+	if len(key) < 32 || !discord.IndependentCredentials(token, key, os.Getenv("DISCORD_ROOM_KEY")) || err != nil || u.Host == "" || u.User != nil || u.Scheme != "https" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 		log.Fatal("configure bot credential, private voice key and HTTPS player origin")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

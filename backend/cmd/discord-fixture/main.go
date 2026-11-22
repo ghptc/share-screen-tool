@@ -18,7 +18,7 @@ func main() {
 	}
 	c := &discord.Config{Fixture: true, Dir: dir, VoiceKey: os.Getenv("DISCORD_VOICE_KEY"), OAuthConfig: discord.OAuthConfig{Origin: origin, ClientID: os.Getenv("DISCORD_CLIENT_ID"), Secret: os.Getenv("DISCORD_CLIENT_SECRET")}}
 	key := os.Getenv("DISCORD_FIXTURE_KEY")
-	if len(key) < 32 || key == c.VoiceKey || len(c.VoiceKey) < 32 || len(c.Secret) < 32 {
+	if len(key) < 32 || !discord.IndependentCredentials(key, c.VoiceKey, c.Secret, os.Getenv("DISCORD_ROOM_KEY")) || len(c.VoiceKey) < 32 || len(c.Secret) < 32 {
 		log.Fatal("independent fixture control key required")
 	}
 	state := discord.FixtureState{User: "1001", Guild: "2001", Channel: "3001", Online: true}

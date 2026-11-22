@@ -56,12 +56,22 @@ func Load(origin, lkKey, lkSecret, playerKey string) (*Config, error) {
 	if err != nil || (v.Scheme != "https" && v.Scheme != "http") || v.Host == "" || v.User != nil || v.Path != "" || v.RawQuery != "" || v.Fragment != "" {
 		return nil, errors.New("invalid private voice service URL")
 	}
-	keys := map[string]bool{lkSecret: true, c.Secret: true}
-	for _, k := range []string{c.VoiceKey, c.AdmissionKey, os.Getenv("DISCORD_ROOM_KEY")} {
-		if len(k) < 32 || keys[k] {
-			return nil, errors.New("use independent Discord service credentials of at least 32 bytes")
-		}
-		keys[k] = true
+	mappingKey := os.Getenv("DISCORD_ROOM_KEY")
+	if len(c.VoiceKey) < 32 || len(c.AdmissionKey) < 32 || !IndependentCredentials(lkSecret, c.Secret, c.VoiceKey, c.AdmissionKey, mappingKey) {
+		return nil, errors.New("use independent credentials for OAuth, LiveKit, room mapping, voice queries and SFU admission")
 	}
 	return c, nil
+}
+
+// IndependentCredentials protects against accidentally giving an unrelated
+// service the same secret as a more privileged service.
+func IndependentCredentials(values ...string) bool {
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		if value == "" || seen[value] {
+			return false
+		}
+		seen[value] = true
+	}
+	return true
 }
