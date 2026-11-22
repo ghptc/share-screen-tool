@@ -18,8 +18,9 @@ import (
 
 type OAuthConfig struct{ Origin, ClientID, Secret, AuthorizeURL, TokenURL, UserURL string }
 type Session struct {
-	ID, User string
-	Until    time.Time
+	ID, User           string
+	Room, Epoch, Entry string // Cloudflare room admission, pinned once per OAuth login.
+	Until              time.Time
 }
 type transaction struct {
 	state, verifier, ref string
@@ -32,12 +33,64 @@ type OAuth struct {
 	pending   map[string]transaction
 	sessions  map[string]Session
 	http      *http.Client
+	roomLogin bool
 	now       func() time.Time
 }
 
 func NewOAuth(c OAuthConfig, d *Directory) *OAuth {
 	return &OAuth{cfg: c, directory: d, pending: map[string]transaction{}, sessions: map[string]Session{}, now: time.Now,
 		http: &http.Client{Timeout: 4 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+}
+
+const RoomLifetime = 36000 * time.Second
+
+// NewRoomOAuth scopes a login to the room where its authorization flow began.
+// The existing LiveKit profile keeps its one-hour application sessions.
+func NewRoomOAuth(c OAuthConfig, d *Directory, now func() time.Time) *OAuth {
+	o := NewOAuth(c, d)
+	o.now, o.roomLogin = now, true
+	return o
+}
+
+// AdmitRoom starts the fixed lease exactly once, after a live voice proof.
+// An expired credential or changed voice epoch can never restart the clock.
+func (o *OAuth) AdmitRoom(id, ref, epoch, entry string) (Session, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	s, ok := o.sessions[id]
+	now := o.now()
+	if !ok || !o.roomLogin || s.Room != ref || epoch == "" || !now.Before(s.Until) {
+		return Session{}, false
+	}
+	if s.Epoch == "" {
+		s.Epoch, s.Entry, s.Until = epoch, entry, now.Add(RoomLifetime)
+		o.sessions[id] = s
+	}
+	return s, s.Epoch == epoch && s.Entry == entry
+}
+
+func roomCookieName(entry string) string {
+	digest := sha256.Sum256([]byte(entry))
+	return "room-" + base64.RawURLEncoding.EncodeToString(digest[:16])
+}
+
+// Tab credentials survive a fresh OAuth login in another tab. An already
+// consumed login may retry its original admission, never start a new one.
+func (o *OAuth) RoomEntry(r *http.Request, entry string) (Session, bool) {
+	if c, e := r.Cookie("__Host-wl-" + roomCookieName(entry)); e == nil {
+		if s, ok := o.Session(c.Value); ok && s.Epoch != "" && s.Entry == entry {
+			return s, true
+		}
+	}
+	s, ok := o.Current(r)
+	return s, ok && (s.Epoch == "" || s.Entry == entry)
+}
+
+func (o *OAuth) WriteRoomCookie(w http.ResponseWriter, s Session) {
+	seconds := int((s.Until.Sub(o.now()) + time.Second - 1) / time.Second)
+	if seconds > 0 {
+		cookie(w, roomCookieName(s.Entry), s.ID, seconds, http.SameSiteStrictMode)
+	}
 }
 func (o *OAuth) Register(m *http.ServeMux) {
 	m.HandleFunc("GET /discord/auth/{ref}", o.begin)
@@ -149,9 +202,14 @@ func (o *OAuth) callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Login busy", 429)
 		return
 	}
-	o.sessions[id] = Session{id, user, now.Add(time.Hour)}
+	session := Session{ID: id, User: user, Until: now.Add(time.Hour)}
+	if o.roomLogin {
+		session.Room = v.ref
+		session.Until = now.Add(5 * time.Minute)
+	}
+	o.sessions[id] = session
 	o.mu.Unlock()
-	cookie(w, "session", id, 3600, http.SameSiteStrictMode)
+	cookie(w, "session", id, int(session.Until.Sub(now)/time.Second), http.SameSiteStrictMode)
 	http.Redirect(w, r, "/r/"+v.ref, http.StatusSeeOther)
 }
 func (o *OAuth) Current(r *http.Request) (Session, bool) {

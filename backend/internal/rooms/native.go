@@ -92,6 +92,15 @@ func (a *API) screenActive(ctx context.Context, owner nativeOwner, screen string
 	if !a.now().Before(owner.Expires) {
 		return false
 	}
+	if g := a.prototype; g != nil {
+		if _, ok := a.validDiscord(ctx, owner.Room, owner.Identity); !ok {
+			return false
+		}
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		t := g.tracks[screen]
+		return t != nil && "dc-"+t.room == owner.Room && t.owner == owner.Identity && t.publication == "" && !t.audio && t.ready && !t.closing
+	}
 	if strings.HasPrefix(owner.Room, "dc-") {
 		if grant, ok := a.validDiscord(ctx, owner.Room, owner.Identity); !ok || !grant.publishing {
 			return false
@@ -173,7 +182,7 @@ func (a *API) claimNative(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, "Pairing code is invalid, expired, or its screen ended")
 		return
 	}
-	if !a.requireDiscordAdmission(w, r) {
+	if a.prototype == nil && !a.requireDiscordAdmission(w, r) {
 		return
 	}
 	lease := randomID(32)
@@ -188,6 +197,10 @@ func (a *API) claimNative(w http.ResponseWriter, r *http.Request) {
 	s.LeaseHash = sha256.Sum256([]byte(lease))
 	s.Expires = a.now().Add(10 * time.Second)
 	a.nativeMu.Unlock()
+	if a.prototype != nil {
+		write(w, 200, map[string]string{"session": s.ID, "lease": lease, "transport": "cloudflare"})
+		return
+	}
 	grant := &auth.VideoGrant{RoomJoin: true, Room: found.Owner.Room}
 	grant.SetCanPublish(true)
 	grant.SetCanPublishSources([]livekit.TrackSource{livekit.TrackSource_SCREEN_SHARE_AUDIO})
@@ -227,6 +240,18 @@ func (a *API) leaseNative(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Expires = a.now().Add(10 * time.Second)
 	a.nativeMu.Unlock()
+	if g := a.prototype; g != nil {
+		g.mu.Lock()
+		for _, t := range g.tracks {
+			if t.helper == copy.ID && !t.closing {
+				if strings.HasSuffix(r.URL.Path, "/ready") {
+					t.ready = true
+				}
+				t.seen = a.now()
+			}
+		}
+		g.mu.Unlock()
+	}
 	write(w, 200, map[string]bool{"active": true})
 }
 func (a *API) stopNative(w http.ResponseWriter, r *http.Request) {
@@ -252,6 +277,16 @@ func (a *API) revokeNative(id string) {
 	s.Revoked = true
 	owner := s.Owner
 	a.nativeMu.Unlock()
+	if g := a.prototype; g != nil {
+		g.mu.Lock()
+		for _, t := range g.tracks {
+			if t.helper == id {
+				g.retireLocked(t)
+			}
+		}
+		g.mu.Unlock()
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	ctx, err := a.nativeContext(ctx, owner.Room)

@@ -18,13 +18,16 @@ import (
 	"github.com/livekit/protocol/auth"
 	"github.com/livekit/protocol/livekit"
 	"github.com/twitchtv/twirp"
+	"golang.org/x/time/rate"
 )
 
 const discordTTL = 45 * time.Second
 
 type roomAccess struct {
+	mediaRequests                   *rate.Limiter
 	controlHash                     [32]byte
 	session, ref, user, epoch, name string
+	entry                           string // idempotency key for one browser navigation
 	until                           time.Time
 	publishing                      bool
 	started                         time.Time
@@ -41,17 +44,27 @@ type channelAccess struct {
 
 func (a *API) RegisterDiscord(m *http.ServeMux, c *discord.Config) {
 	d := &channelAccess{c: c, oauth: discord.NewOAuth(c.OAuthConfig, c.Dir), active: map[string]roomAccess{}, client: &http.Client{Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	if a.prototype != nil {
+		d.oauth = discord.NewRoomOAuth(c.OAuthConfig, c.Dir, func() time.Time { return a.now() })
+	}
 	a.discord = d
 	d.oauth.Register(m)
 	m.Handle("POST /discord/{ref}/join", a.guard(http.HandlerFunc(a.discordJoin)))
-	m.Handle("POST /discord/{ref}/publish", a.guard(http.HandlerFunc(a.discordPublish)))
-	m.Handle("POST /discord/{ref}/stop", a.guard(http.HandlerFunc(a.discordPublish)))
-	m.HandleFunc("POST /internal/discord/admit", a.discordAdmit)
-	if !c.Fixture {
-		m.HandleFunc("GET /readyz", a.discordReady)
+	if a.prototype != nil {
+		a.RegisterNative(m)
+		m.Handle("POST /native-audio/{session}/ready", a.guard(http.HandlerFunc(a.leaseNative)))
+		m.Handle("POST /native-audio/{session}/publish", a.guard(http.HandlerFunc(a.cfHelperPublish)))
+		m.Handle("POST /discord/{ref}/media/{action}", a.guardRequests(http.HandlerFunc(a.cfSignal), false))
+	} else {
+		m.Handle("POST /discord/{ref}/publish", a.guard(http.HandlerFunc(a.discordPublish)))
+		m.Handle("POST /discord/{ref}/stop", a.guard(http.HandlerFunc(a.discordPublish)))
+		m.HandleFunc("POST /internal/discord/admit", a.discordAdmit)
+		if !c.Fixture {
+			m.HandleFunc("GET /readyz", a.discordReady)
+		}
+		m.HandleFunc("GET /discord/signal/{identity}/rtc", a.discordSignal)
+		m.HandleFunc("GET /discord/signal/{identity}/rtc/{path...}", a.discordSignal)
 	}
-	m.HandleFunc("GET /discord/signal/{identity}/rtc", a.discordSignal)
-	m.HandleFunc("GET /discord/signal/{identity}/rtc/{path...}", a.discordSignal)
 	if c.Fixture {
 		// Forward only the OAuth authorization endpoint to the private fixture.
 		// The browser never selects a user or voice channel.
@@ -79,7 +92,7 @@ func (a *API) RegisterDiscord(m *http.ServeMux, c *discord.Config) {
 }
 func (d *channelAccess) epoch(ctx context.Context, ref, user string) string {
 	ch, ok := d.c.Dir.Lookup(ref)
-	if !ok || d.c.Blocked[user] {
+	if !ok || d.c.Blocked[user] || (d.c.PilotUsers != nil && !d.c.PilotUsers[user]) {
 		return ""
 	}
 	body, _ := json.Marshal(map[string]string{"Guild": ch.Guild, "User": user})
@@ -118,7 +131,18 @@ func (a *API) discordJoin(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "Unknown room")
 		return
 	}
-	s, ok := d.oauth.Current(r)
+	entry := r.Header.Get("X-Whiterun-Entry")
+	var s discord.Session
+	var ok bool
+	if a.prototype != nil {
+		if len(entry) > 64 {
+			fail(w, 400, "Invalid room entry")
+			return
+		}
+		s, ok = d.oauth.RoomEntry(r, entry)
+	} else {
+		s, ok = d.oauth.Current(r)
+	}
 	if !ok {
 		fail(w, 401, "Discord sign-in required")
 		return
@@ -128,21 +152,53 @@ func (a *API) discordJoin(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, "Connect to this Discord voice channel to watch")
 		return
 	}
+	if a.prototype != nil {
+		if s, ok = d.oauth.AdmitRoom(s.ID, ref, epoch, entry); !ok {
+			fail(w, 403, "Room authorization ended")
+			return
+		}
+	}
 	identity := "participant-" + randomID(18)
 	control := randomID(32)
+	if a.prototype != nil {
+		control = a.prototype.controlFor(identity)
+	}
 	room := "dc-" + ref
 	d.mu.Lock()
+	if a.prototype != nil {
+		for peer, previous := range d.active {
+			if previous.session == s.ID && previous.ref == ref && previous.entry == entry {
+				d.mu.Unlock()
+				a.cfJoined(w, s, peer, a.prototype.controlFor(peer))
+				return
+			}
+		}
+	}
 	if len(d.active) >= 8192 {
 		d.mu.Unlock()
 		fail(w, 429, "Room session limit reached")
 		return
 	}
-	d.active[identity] = roomAccess{controlHash: sha256.Sum256([]byte(control)), session: s.ID, ref: ref, user: s.User, epoch: epoch, name: "Screen " + randomID(3), until: s.Until}
+	access := roomAccess{controlHash: sha256.Sum256([]byte(control)), session: s.ID, ref: ref, user: s.User, epoch: epoch, name: "Screen " + randomID(3), until: s.Until}
+	if a.prototype != nil {
+		access.mediaRequests = rate.NewLimiter(5, 20)
+		access.entry = entry
+	}
+	d.active[identity] = access
 	d.mu.Unlock()
 	a.nativeMu.Lock()
 	a.nativeOwners[sha256.Sum256([]byte(control))] = nativeOwner{room, identity, s.Until}
 	a.nativeMu.Unlock()
+	if a.prototype != nil {
+		a.cfJoined(w, s, identity, control)
+		return
+	}
 	write(w, 200, map[string]any{"token": "session", "identity": identity, "roomId": room, "serverUrl": d.c.Origin + "/api/discord/signal/" + identity, "canPublish": true, "nativeAudioControl": control})
+}
+
+func (a *API) cfJoined(w http.ResponseWriter, s discord.Session, id, control string) {
+	a.discord.oauth.WriteRoomCookie(w, s)
+	write(w, 200, map[string]any{"transport": "cloudflare-prototype", "identity": id, "nativeAudioControl": control, "expiresAt": s.Until, "serverTime": a.now()})
 }
 
 // Browsers authenticate the signaling socket with the application session. The
@@ -234,10 +290,11 @@ func (a *API) validDiscord(ctx context.Context, room, id string) (roomAccess, bo
 		return roomAccess{}, false
 	}
 	_, sessionOK := d.oauth.Session(b.session)
-	if !sessionOK || d.epoch(ctx, b.ref, b.user) != b.epoch {
+	expired := func() bool { return a.prototype != nil && !a.now().Before(b.until) }
+	if !sessionOK || expired() || d.epoch(ctx, b.ref, b.user) != b.epoch || expired() {
 		// A canceled client request has no authority to revoke another socket.
 		// Deny this request. The independent SFU and API monitors keep checking.
-		if sessionOK && ctx.Err() != nil {
+		if sessionOK && !expired() && ctx.Err() != nil {
 			return roomAccess{}, false
 		}
 		d.mu.Lock()
@@ -246,6 +303,7 @@ func (a *API) validDiscord(ctx context.Context, room, id string) (roomAccess, bo
 		d.mu.Unlock()
 		if registered {
 			d.oauth.Revoke(b.session)
+
 			a.nativeMu.Lock()
 			delete(a.nativeOwners, b.controlHash)
 			var helpers []string
@@ -255,6 +313,20 @@ func (a *API) validDiscord(ctx context.Context, room, id string) (roomAccess, bo
 				}
 			}
 			a.nativeMu.Unlock()
+			if g := a.prototype; g != nil {
+				g.mu.Lock()
+				g.changedLocked()
+				for _, track := range g.tracks {
+					if track.owner == id {
+						g.retireLocked(track)
+					}
+				}
+				g.mu.Unlock()
+				for _, sid := range helpers {
+					a.revokeNative(sid)
+				}
+				return roomAccess{}, false
+			}
 			go func() {
 				for _, sid := range helpers {
 					a.revokeNative(sid)
@@ -420,6 +492,11 @@ func (a *API) ReconcileDiscord(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			if a.prototype != nil {
+				c, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+				a.sweepCloudflare(c, true)
+				cancel()
+			}
 			return
 		case <-ticker.C:
 		}
@@ -476,6 +553,9 @@ func (a *API) ReconcileDiscord(ctx context.Context) {
 				}
 				d.updateMu.Unlock()
 			}
+		}
+		if a.prototype != nil {
+			a.sweepCloudflare(ctx, false)
 		}
 	}
 }

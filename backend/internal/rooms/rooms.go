@@ -35,6 +35,7 @@ type entry struct {
 	Joins       *rate.Limiter
 }
 type API struct {
+	prototype      *cfRegistry
 	discord        *channelAccess
 	cfg            Config
 	mu             sync.Mutex
@@ -60,7 +61,9 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.Handle("POST /rooms/{id}/join", a.guard(http.HandlerFunc(a.join)))
 }
 
-func (a *API) guard(next http.Handler) http.Handler {
+func (a *API) guard(next http.Handler) http.Handler { return a.guardRequests(next, true) }
+
+func (a *API) guardRequests(next http.Handler, globalLimit bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -68,7 +71,7 @@ func (a *API) guard(next http.Handler) http.Handler {
 			fail(w, 403, "Origin not allowed")
 			return
 		}
-		if !a.requests.Allow() {
+		if globalLimit && !a.requests.Allow() {
 			fail(w, 429, "Too many requests; try again shortly")
 			return
 		}

@@ -1,0 +1,15 @@
+[Unit]
+Description=Whiterun private Discord voice authority
+After=network-online.target
+
+[Service]
+Environment=WHITERUN_ENV=production DISCORD_MODE=discord DISCORD_VOICE_ADDR=127.0.0.1:18491
+EnvironmentFile=%h/.config/whiterun-pilot/bot.env
+ExecStart=%h/.local/lib/whiterun-pilot/discord-bot
+NoNewPrivileges=yes
+UMask=0077
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=default.target
