@@ -265,18 +265,22 @@ func WatchController(path string) error {
 		return err
 	}
 	ack.Close()
-	disconnected := make(chan struct{})
-	go func() { _, _ = io.Copy(io.Discard, parent); close(disconnected) }()
+	live, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_, _ = io.Copy(io.Discard, parent)
+		cancel()
+	}()
 	o := &OwnedMedia{media, dir}
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
-live:
+watch:
 	for {
 		select {
-		case <-disconnected:
-			break live
+		case <-live.Done():
+			break watch
 		case now := <-tick.C:
-			_ = o.reap(context.Background(), now)
+			_ = o.reap(live, now)
 		}
 	}
 	delay := time.Second

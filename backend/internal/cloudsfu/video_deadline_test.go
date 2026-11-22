@@ -71,7 +71,7 @@ func TestHostedVideoDeadline(t *testing.T) {
 	if err != nil || len(frame) < 45 || string(frame[:4]) != "DKIF" || int(binary.LittleEndian.Uint32(frame[32:])) != len(frame)-44 {
 		t.Fatal("VP8 fixture unavailable")
 	}
-	for _, role := range []string{"publisher", "subscriber", "host-outage"} {
+	for _, role := range []string{"publisher", "subscriber", "host-outage", "crash"} {
 		t.Run(role, func(t *testing.T) { hostedVideoDeadline(t, role, frame[44:]) })
 	}
 }
@@ -208,7 +208,12 @@ func hostedVideoDeadline(t *testing.T, role string, frame []byte) {
 	if !time.Now().Before(owned.Until) {
 		t.Fatal("setup exceeded test lease")
 	}
-	if err = child.Process.Signal(syscall.SIGSTOP); err != nil {
+	interrupted := time.Now()
+	signal := syscall.SIGSTOP
+	if role == "crash" {
+		signal = syscall.SIGKILL
+	}
+	if err = child.Process.Signal(signal); err != nil {
 		t.Fatal(err)
 	}
 	if role == "host-outage" {
@@ -253,11 +258,26 @@ func hostedVideoDeadline(t *testing.T, role string, frame []byte) {
 		t.Fatal("provider did not confirm closure")
 	}
 	lag := time.Since(owned.Until)
+	crashDelay := time.Since(interrupted)
+	if role == "crash" {
+		var replacement *Guard
+		wait(func() bool { replacement, err = StartGuard(ctx, dir, c); return err == nil })
+		replacement.Stop()
+		select {
+		case <-replacement.Done:
+		case <-ctx.Done():
+			t.Fatal("replacement did not exit")
+		}
+	}
 	time.Sleep(350 * time.Millisecond)
 	n := packets.Load()
 	time.Sleep(time.Second)
 	if packets.Load() != n {
 		t.Fatal("video continued past confirmed closure")
+	}
+	if role == "crash" {
+		t.Logf("SIGKILL to confirmed provider closure %s; replacement acquired ownership; zero video packets in final second", crashDelay.Round(time.Millisecond))
+		return
 	}
 	t.Logf("provider closure confirmed %s after deadline; %d prior video packets, zero in final second while sender remained active", lag.Round(time.Millisecond), n)
 }
