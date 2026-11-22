@@ -7,14 +7,11 @@ import (
 	"io"
 	"math"
 	"time"
-
-	lksdk "github.com/livekit/server-sdk-go/v2"
-	"github.com/pion/webrtc/v4/pkg/media"
 )
 
 // A single sample clock: 960 stereo PCM frames -> one 20ms Opus packet ->
 // exactly 960 RTP ticks at 48 kHz. There is no FFmpeg demux/encode queue.
-func streamPCM(ctx context.Context, input io.Reader, track *lksdk.LocalTrack, timing *timingLog) error {
+func streamPCM(ctx context.Context, input io.Reader, write sampleWriter, timing *timingLog) error {
 	encoder, err := newOpusEncoder()
 	if err != nil {
 		return err
@@ -51,7 +48,7 @@ func streamPCM(ctx context.Context, input io.Reader, track *lksdk.LocalTrack, ti
 		timing.emit("encode", map[string]any{"pcmBytes": len(pcm), "samplesPerChannel": 960, "rate": 48000, "channels": 2, "encoderMs": float64(time.Since(encodeStarted)) / float64(time.Millisecond)})
 		return packet, nil
 	}
-	err = pumpOpus(ctx, read, func(sample media.Sample) error { return track.WriteSample(sample, nil) }, timing)
+	err = pumpOpus(ctx, read, write, timing)
 	if err != nil {
 		return fmt.Errorf("PCM/Opus stream: %w", err)
 	}

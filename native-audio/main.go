@@ -16,16 +16,10 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/livekit/protocol/livekit"
-	lksdk "github.com/livekit/server-sdk-go/v2"
-	"github.com/pion/interceptor"
-	"github.com/pion/rtcp"
-	"github.com/pion/webrtc/v4"
 	"golang.org/x/sys/unix"
 )
 
@@ -86,7 +80,13 @@ func post(ctx context.Context, base, path, key string, input, out any) error {
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
-	res, err := client.Do(req)
+	httpClient := client
+	if strings.HasSuffix(path, "/publish") {
+		slow := *client
+		slow.Timeout = 14 * time.Second
+		httpClient = &slow
+	}
+	res, err := httpClient.Do(req)
 	if err != nil {
 		return errors.New("backend unavailable")
 	}
@@ -121,7 +121,7 @@ func run() (runErr error) {
 	confirm := flag.Bool("start", false, "Explicitly consent to capturing the selected application or diagnostic monitor until Ctrl-C or screen/session stop")
 	flag.Parse()
 	if *launcher {
-		return serveDesktop(*playerOrigin)
+		return serveDesktop(*playerOrigin, os.Getenv("WHITERUN_DESKTOP_SOCKET"))
 	}
 	identity, err := executableIdentity()
 	if err != nil {
@@ -241,7 +241,7 @@ func run() (runErr error) {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	var credentials struct{ Session, Lease, Token, ServerURL string }
+	var credentials audioCredentials
 	if err := post(ctx, base, "/native-audio/claim", "", map[string]any{"code": pair.Code, "localOnly": *localCapture}, &credentials); err != nil {
 		return err
 	}
@@ -262,16 +262,6 @@ func run() (runErr error) {
 			runErr = errors.Join(runErr, fmt.Errorf("timing log close: %w", err))
 		}
 	}()
-	options := []lksdk.ConnectOption{lksdk.WithAutoSubscribe(false)}
-	if timing != nil {
-		options = append(options, lksdk.WithInterceptors([]interceptor.Factory{timingFactory{log: timing}}), lksdk.WithIncludeDefaultInterceptors(true))
-	}
-	room, err := lksdk.ConnectToRoomWithToken(credentials.ServerURL, credentials.Token, &lksdk.RoomCallback{OnDisconnected: cancel}, options...)
-	credentials.Token = ""
-	if err != nil {
-		return errors.New("could not connect to LiveKit")
-	}
-	defer room.Disconnect()
 	properties := "node.dont-move=true node.dont-reconnect=true node.dont-fallback=true"
 	if tap != nil {
 		properties += " node.name=" + tap.captureName + " stream.dont-remix=true"
@@ -289,42 +279,14 @@ func run() (runErr error) {
 	lastPCM.Store(time.Now().UnixNano())
 	input := &activityReader{Reader: pcm, last: &lastPCM, timing: timing}
 	capture.Stderr = os.Stderr
-	var startupExpired atomic.Bool
-	startup := time.AfterFunc(8*time.Second, func() { startupExpired.Store(true); cancel() })
-	defer startup.Stop()
-	track, err := lksdk.NewLocalSampleTrack(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2}, lksdk.WithRTCPHandler(func(packet rtcp.Packet) {
-		if report, ok := packet.(*rtcp.ReceiverReport); ok {
-			for _, r := range report.Reports {
-				timing.emit("rtcp_receiver_report", map[string]any{"ssrc": r.SSRC, "fractionLost": r.FractionLost, "totalLost": r.TotalLost, "jitterSamples": r.Jitter, "lastSequence": r.LastSequenceNumber})
-			}
-		}
-	}))
+	if credentials.Transport == "cloudflare" && tap == nil {
+		return errors.New("Cloudflare audio requires an explicitly selected application")
+	}
+	writeSample, closeMedia, err := openAudioTransport(ctx, cancel, base, credentials, timing)
 	if err != nil {
-		return errors.New("Opus encoder did not initialize")
+		return err
 	}
-	var streamOnce sync.Once
-	bound := make(chan struct{})
-	track.OnBind(func() {
-		timing.emit("publication_bound", map[string]any{})
-		streamOnce.Do(func() { close(bound) })
-	})
-	track.OnUnbind(func() { timing.emit("publication_unbound", map[string]any{}) })
-	defer track.Close()
-	pub, err := room.LocalParticipant.PublishTrack(track, &lksdk.TrackPublicationOptions{Name: "PipeWire selected audio", Source: livekit.TrackSource_SCREEN_SHARE_AUDIO})
-	if err != nil {
-		return errors.New("audio publication rejected")
-	}
-	defer room.LocalParticipant.UnpublishTrack(pub.SID())
-	// Do not queue old desktop audio in an unread pipe during SDP/ICE negotiation.
-	select {
-	case <-bound:
-	case <-ctx.Done():
-		if startupExpired.Load() {
-			return errors.New("audio publication did not bind within eight seconds")
-		}
-		return nil
-	}
-	startup.Stop()
+	defer closeMedia()
 	if err := capture.Start(); err != nil {
 		return err
 	}
@@ -378,7 +340,7 @@ func run() (runErr error) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		streamError = streamPCM(ctx, input, track, timing)
+		streamError = streamPCM(ctx, input, writeSample, timing)
 	}()
 	defer func() {
 		cancel()
@@ -394,15 +356,9 @@ func run() (runErr error) {
 	for {
 		select {
 		case <-ctx.Done():
-			if startupExpired.Load() {
-				return errors.New("audio publication did not bind within eight seconds")
-			}
 			return nil
 		case <-done:
 			if ctx.Err() != nil {
-				if startupExpired.Load() {
-					return errors.New("audio publication did not bind within eight seconds")
-				}
 				return nil
 			}
 			return fmt.Errorf("audio stream ended; list and select the source again to resume: %w", streamError)

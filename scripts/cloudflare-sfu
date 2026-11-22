@@ -65,13 +65,19 @@ def run_player(provider):
         for name in ("server", "discord-fixture"):
             subprocess.run(["go", "build", "-o", f"{temp}/{name}", f"./cmd/{name}"],
                            cwd=ROOT / "backend", env=TOOLS, check=True)
+        helper = f"{temp}/audio-helper"
+        subprocess.run(["go", "build", "-o", helper, "."], cwd=ROOT / "native-audio", env=TOOLS, check=True)
+        socket_path = f"{temp}/audio.sock"
         children = []
         try:
+            children.append(subprocess.Popen([helper, "--desktop-launcher", "--player-origin", origin],
+                                             env={**TOOLS, "WHITERUN_DESKTOP_SOCKET": socket_path}))
             children.append(subprocess.Popen([f"{temp}/discord-fixture"], env=fixture))
             children.append(subprocess.Popen([f"{temp}/server"], env=api))
             children.append(subprocess.Popen(
                 ["node", "node_modules/vite/bin/vite.js", "--host", "127.0.0.1", "--port", "5191", "--strictPort"],
-                cwd=ROOT / "frontend", env={**TOOLS, "APP_ORIGIN": origin, "API_PROXY_TARGET": "http://" + backend}))
+                cwd=ROOT / "frontend", env={**TOOLS, "APP_ORIGIN": origin, "API_PROXY_TARGET": "http://" + backend,
+                                           "PLAYER_AUDIO_SOCKET": socket_path, "LOCAL_PLAYER_KEY": secrets.token_hex(32)}))
             for _ in range(80):
                 if any(p.poll() is not None for p in children):
                     raise SystemExit("A prototype process exited during startup")
@@ -107,7 +113,7 @@ def run_player(provider):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("test-local", "test-hosted", "player"))
+    parser.add_argument("mode", choices=("test-local", "test-hosted", "test-hosted-audio", "test-crash", "player"))
     parser.add_argument("--env-file", type=Path, default=ROOT / ".env")
     parser.add_argument("--browser", choices=("chromium", "firefox"), default="chromium")
     args = parser.parse_args()
@@ -115,10 +121,20 @@ def main():
     if args.mode == "player":
         run_player(provider)
         return
+    if args.mode == "test-crash":
+        subprocess.run(["go", "test", "-count=1", "-v", "-run", "^TestHostedControllerCrash$", "./internal/cloudsfu"],
+                       cwd=ROOT / "backend", env={**TOOLS, **provider, "WHITERUN_SFU_MEDIA_TEST": "cloudflare"}, check=True)
+        return
     subprocess.run(["npm", "run", "build"], cwd=ROOT / "frontend", env=TOOLS, check=True)
     mode = "loopback" if args.mode == "test-local" else "cloudflare"
-    subprocess.run(["go", "test", "-v", "-count=1", "-run", "^TestTwoBrowserMedia$", "./internal/rooms"],
-                   cwd=ROOT / "backend", env={**TOOLS, **provider, "WHITERUN_SFU_MEDIA_TEST": mode,
+    with tempfile.TemporaryDirectory(prefix="wl-helper-") as temp:
+        extra = {}
+        if args.mode == "test-hosted-audio":
+            helper = str(Path(temp) / "audio-helper")
+            subprocess.run(["go", "build", "-o", helper, "."], cwd=ROOT / "native-audio", env=TOOLS, check=True)
+            extra["WHITERUN_SFU_TEST_HELPER"] = helper
+        subprocess.run(["go", "test", "-v", "-count=1", "-run", "^TestTwoBrowserMedia$", "./internal/rooms"],
+                   cwd=ROOT / "backend", env={**TOOLS, **provider, **extra, "WHITERUN_SFU_MEDIA_TEST": mode,
                                                "E2E_BROWSER": args.browser}, check=True)
 
 

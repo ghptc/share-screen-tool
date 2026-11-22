@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -20,17 +21,26 @@ import (
 )
 
 // systemd owns the mode-0600 Unix socket. Listing touches only graph metadata.
-func serveDesktop(origin string) error {
+func serveDesktop(origin, socket string) error {
 	u, err := url.Parse(origin)
 	if err != nil || u.Scheme != "http" || u.Hostname() != "localhost" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("desktop player requires a localhost origin")
 	}
-	if os.Getenv("LISTEN_FDS") != "1" || os.Getenv("LISTEN_PID") != strconv.Itoa(os.Getpid()) {
-		return errors.New("start the desktop launcher with its user socket")
+	var listener net.Listener
+	if socket != "" {
+		info, e := os.Lstat(filepath.Dir(socket))
+		if e != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Getuid()) {
+			return errors.New("desktop socket requires an owner-only directory")
+		}
+		listener, err = net.Listen("unix", socket)
+	} else {
+		if os.Getenv("LISTEN_FDS") != "1" || os.Getenv("LISTEN_PID") != strconv.Itoa(os.Getpid()) {
+			return errors.New("start the desktop launcher with its user socket")
+		}
+		fd := os.NewFile(3, "desktop launcher")
+		listener, err = net.FileListener(fd)
+		fd.Close()
 	}
-	fd := os.NewFile(3, "desktop launcher")
-	listener, err := net.FileListener(fd)
-	fd.Close()
 	if err != nil {
 		return err
 	}

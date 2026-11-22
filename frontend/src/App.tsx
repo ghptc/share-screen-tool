@@ -8,7 +8,7 @@ import './player.css'
 
 function Player({ channel }: {channel?: string}) {
   const [session, setSession] = useState<{ room: Room; credentials: JoinResult } | null>(null)
-  const [prototypePeer, setPrototypePeer] = useState('')
+  const [prototypePeer, setPrototypePeer] = useState<{identity: string; control: string} | null>(null)
   const [state, setState] = useState('Connecting')
   const [error, setError] = useState('')
   const [attempt, setAttempt] = useState(0)
@@ -32,7 +32,7 @@ function Player({ channel }: {channel?: string}) {
         room = undefined
       }
       setSession(null)
-      setPrototypePeer('')
+      setPrototypePeer(null)
     }
     function retry() {
       disposeRoom()
@@ -67,7 +67,7 @@ function Player({ channel }: {channel?: string}) {
         const credentials: JoinResult & {transport?: string} = await response.json()
         if (controller.signal.aborted) return
         if (channel && credentials.transport === 'cloudflare-prototype') {
-          setPrototypePeer(credentials.identity)
+          setPrototypePeer({identity:credentials.identity,control:credentials.nativeAudioControl ?? ''})
           setState('Connected')
           return
         }
@@ -113,7 +113,7 @@ function Player({ channel }: {channel?: string}) {
           {state}
         </span>
       </header>
-      {prototypePeer && channel ? <CloudflareStage key={prototypePeer} channel={channel} identity={prototypePeer} onDenied={() => { setPrototypePeer(''); setState('Unavailable'); setError('Connect to the associated Discord voice channel to watch.') }} /> : session ? (
+      {prototypePeer && channel ? <CloudflareStage key={prototypePeer.identity} channel={channel} identity={prototypePeer.identity} control={prototypePeer.control} onDenied={() => { setPrototypePeer(null); setState('Unavailable'); setError('Connect to the associated Discord voice channel to watch.') }} /> : session ? (
         <ScreenSharing
           player
           channel={channel}
