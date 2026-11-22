@@ -3,6 +3,7 @@ package cloudsfu
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -129,7 +130,7 @@ func TestCloseRequiresTerminalProviderEvidence(t *testing.T) {
 	}{
 		{"already ended session", "0", 410, `{"errorCode":"session_error"}`, true},
 		{"ended session during mid recovery", "", 410, `{"errorCode":"session_error"}`, true},
-		{"track was closed", "0", 200, `{"tracks":[{"mid":"0","errorCode":"close_track_error"}]}`, true},
+		{"ambiguous close failure", "0", 200, `{"tracks":[{"mid":"0","errorCode":"close_track_error"}]}`, false},
 		{"session still connecting", "0", 425, `{"errorCode":"session_error"}`, false},
 		{"missing app", "0", 404, `{"errorCode":"not_found"}`, false},
 		{"missing app during mid recovery", "", 404, `{"errorCode":"not_found"}`, false},
@@ -143,7 +144,7 @@ func TestCloseRequiresTerminalProviderEvidence(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				verb := "PUT"
-				if tc.mid == "" {
+				if tc.mid == "" || (tc.name == "ambiguous close failure" && r.Method == "GET") {
 					verb = "GET"
 				}
 				if r.Method != verb {
@@ -158,5 +159,23 @@ func TestCloseRequiresTerminalProviderEvidence(t *testing.T) {
 				t.Fatalf("closed = %t, want %t", err == nil, tc.closed)
 			}
 		})
+	}
+}
+
+func TestCheckAmbiguousCloseAgainstSession(t *testing.T) {
+	for _, status := range []string{"active", "inactive"} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "PUT" {
+				io.WriteString(w, `{"tracks":[{"mid":"0","errorCode":"close_track_error"}]}`)
+				return
+			}
+			io.WriteString(w, `{"tracks":[{"mid":"0","status":"`+status+`"}]}`)
+		}))
+		c := Client{base: srv.URL, http: srv.Client()}
+		err := c.Close(t.Context(), "owned", "0")
+		srv.Close()
+		if (err == nil) != (status == "inactive") {
+			t.Fatalf("incorrect closure for %s", status)
+		}
 	}
 }

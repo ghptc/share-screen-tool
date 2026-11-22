@@ -185,9 +185,16 @@ func (c *Client) Close(ctx context.Context, id, mid string) error {
 	if len(out.Tracks) != 1 || out.Tracks[0].Mid != mid {
 		return errResponse
 	}
-	// The item code identifies an absent or previously closed track. The description is free text.
-	if code := out.Tracks[0].Error; code != "" && code != "close_track_error" {
-		return errResponse
+	switch out.Tracks[0].Error {
+	case "":
+		return nil
+	case "close_track_error":
+		// A per-track close failure can be ambiguous. Keep the journal until
+		// a separate provider read establishes the track (or session) ended.
+		state, err := c.call(ctx, "GET", "/"+id, nil)
+		if err == errSessionGone || (err == nil && len(state.Tracks) == 1 && state.Tracks[0].Mid == mid && state.Tracks[0].Status == "inactive") {
+			return nil
+		}
 	}
-	return nil
+	return errResponse
 }
