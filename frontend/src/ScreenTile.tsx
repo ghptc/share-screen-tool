@@ -100,6 +100,7 @@ export function ScreenTile({
     <article
       ref={container}
       hidden={hidden}
+      data-track-sid={screen.publication.trackSid}
       className={onFocus ? 'player-tile' : 'stream-tile'}
       aria-label={`${screen.owner} screen${screen.local ? ' (you)' : ''}`}
     >
