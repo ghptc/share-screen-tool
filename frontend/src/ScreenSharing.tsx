@@ -30,7 +30,13 @@ function stopCapture(owned: Owned) {
   owned.stream.getTracks().forEach(track => track.stop())
 }
 
-export default function ScreenSharing({ room, canPublish, nativeAudioControl, player=false }: { player?: boolean; room: Room; canPublish: boolean; nativeAudioControl?: string }) {
+export default function ScreenSharing({ room, canPublish, nativeAudioControl, channel, player=false }: { player?: boolean; channel?: string; room: Room; canPublish: boolean; nativeAudioControl?: string }) {
+  async function authorizeScreen(enabled: boolean) {
+    if (!channel) return
+    const response = await fetch('/api/discord/'+channel+(enabled?'/publish':'/stop'), {method:'POST',
+      headers:{'Content-Type':'application/json',Authorization:'Bearer '+nativeAudioControl}, body:'{}',keepalive:!enabled, signal:AbortSignal.timeout(6000)})
+    if (!response.ok) throw new Error('Screen publication requires current voice-channel membership.')
+  }
   const [audioPeers, setAudioPeers] = useState<{ identity: string; owner: string; publication?: TrackPublication; publisherIdentity?: string }[]>([])
   const [nativeStatus, setNativeStatus] = useState('Native helper not connected.')
   const [shareAudio, setShareAudio] = useState(false)
@@ -126,7 +132,7 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
         // LiveKit temporarily unpublishes live tracks during a full reconnect.
         // Preserve the consented capture so the SDK can republish it without a new prompt.
         if (room.state !== ConnectionState.Connected && room.state !== ConnectionState.Disconnected && owned.current.track.mediaStreamTrack.readyState === 'live') { sync(); return }
-        const previous = owned.current; owned.current = null; stopCapture(previous)
+        const previous = owned.current; owned.current = null; void authorizeScreen(false).catch(() => {}); stopCapture(previous)
         if (previous.audio) void room.localParticipant.unpublishTrack(previous.audio, true).catch(() => { if (mounted.current) setError('Audio cleanup failed. Leave and rejoin the room.') })
         if (mounted.current) { setSharing(false); setSettings(null) }
       }
@@ -144,7 +150,7 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
       for (const event of events) room.off(event, sync)
       room.off(RoomEvent.LocalTrackUnpublished, unpublished).off(RoomEvent.ConnectionStateChanged, state).off(RoomEvent.TrackSubscriptionFailed, failed)
       const active = owned.current; owned.current = null
-      if (active) { stopCapture(active); void unpublish(active).catch(() => {}) }
+      if (active) { stopCapture(active); void authorizeScreen(false).catch(() => {}); void unpublish(active).catch(() => {}) }
     }
   }, [room])
 
@@ -169,6 +175,7 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
     const ticket = ++generation.current
     let active: Owned | null = null
     let captured: MediaStream | null = null
+    let authorized = false
     try {
       // No awaits before this call: capture must retain the button's user activation.
       const stream = await navigator.mediaDevices.getDisplayMedia(shareAudio ? {
@@ -195,7 +202,7 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
           if (owned.current?.track !== track) return
           const endedCapture = owned.current
           owned.current = null
-          stopCapture(endedCapture)
+          stopCapture(endedCapture); void authorizeScreen(false).catch(() => {})
           void unpublish(endedCapture).catch(() => {
             if (mounted.current) setError('Capture ended, but cleanup failed. Leave and rejoin the room.')
           })
@@ -204,6 +211,11 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
       active = { track, stream, ended }
       raw.addEventListener('ended', ended, { once: true })
       if (!captureIsCurrent(ticket, raw) || room.state !== ConnectionState.Connected) { stopCapture(active); return }
+      if (channel) {
+        await authorizeScreen(true)
+        authorized = true
+        if (!captureIsCurrent(ticket,raw)) { stopCapture(active); await authorizeScreen(false); return }
+      }
       owned.current = active
       await room.localParticipant.publishTrack(track, { source: Track.Source.ScreenShare, videoCodec: 'vp8', simulcast: true,
         screenShareEncoding: { maxBitrate: 8_000_000, maxFramerate: 60 }, degradationPreference: 'balanced' })
@@ -251,6 +263,7 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
       }
       syncRef.current()
     } catch (cause) {
+      if (authorized) await authorizeScreen(false).catch(() => {})
       if (active) {
         stopCapture(active)
         await unpublish(active).catch(() => {})
@@ -272,7 +285,7 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
     if (!active) return
     generation.current++; busyRef.current = true; setBusy('stopping'); setError('')
     owned.current = null; stopCapture(active); setSharing(false); setSettings(null)
-    try { await unpublish(active); setAudioStatus('Audio stopped.'); setNotice('Screen sharing stopped.') }
+    try { await Promise.all([unpublish(active), authorizeScreen(false)]); setAudioStatus('Audio stopped.'); setNotice('Screen sharing stopped.') }
     catch { if (mounted.current) setError('Local capture stopped, but unpublishing failed. Leave the room to finish cleanup.') }
     finally { busyRef.current = false; if (mounted.current) { setBusy(''); syncRef.current() } }
   }

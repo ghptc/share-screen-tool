@@ -72,8 +72,50 @@ index a67adf7..963c719 100644
 @@ -93,0 +94 @@ type Room struct {
 +	ScreenSlots ScreenSlots
 diff --git a/pkg/service/roommanager.go b/pkg/service/roommanager.go
-index 6a70c6b..e9c0648 100644
+index 6a70c6b..b7ecdda 100644
 --- a/pkg/service/roommanager.go
 +++ b/pkg/service/roommanager.go
-@@ -492,0 +493 @@ func (r *RoomManager) StartSession(
+@@ -328,0 +329,3 @@ func (r *RoomManager) StartSession(
++	if protectedRoom(protoRoom.Name) && (pi.Grants == nil || !voiceAuthorized(ctx, protoRoom.Name, string(pi.Identity), pi.Grants.Video)) {
++		return rtc.ErrPermissionDenied
++	}
+@@ -492,0 +496 @@ func (r *RoomManager) StartSession(
 +		ScreenSlots:              &room.ScreenSlots,
+@@ -575,0 +580,16 @@ func (r *RoomManager) StartSession(
++	if protectedRoom(protoRoom.Name) {
++		go func(p types.LocalParticipant, roomName string) {
++			ticker := time.NewTicker(2 * time.Second)
++			defer ticker.Stop()
++			for range ticker.C {
++				if p.IsClosed() {
++					return
++				}
++				if !voiceAuthorized(context.Background(), roomName, string(p.Identity()), nil) {
++					p.Close(true, types.ParticipantCloseReasonServiceRequestRemoveParticipant, false)
++					return
++				}
++			}
++		}(participant, protoRoom.Name)
++	}
++
+@@ -1176,0 +1197,11 @@ func (r *RoomManager) refreshToken(participant types.LocalParticipant) error {
++	if grants.Video != nil && protectedRoom(grants.Video.Room) {
++		if !voiceAuthorized(context.Background(), grants.Video.Room, string(participant.Identity()), grants.Video) {
++			return rtc.ErrPermissionDenied
++		}
++		// Browsers reconnect through the authenticated same-origin signaling proxy.
++		// Do not deliver a bearer JWT into the browser SDK's URL-based resume path.
++		if grants.Video.GetCanSubscribe() {
++			return nil
++		}
++		validFor = 45 * time.Second
++	}
+diff --git a/pkg/service/utils.go b/pkg/service/utils.go
+index 0ee1d55..6ef6abd 100644
+--- a/pkg/service/utils.go
++++ b/pkg/service/utils.go
+@@ -401,0 +402,4 @@ func ValidateConnectRequest(
++	if protectedRoom(string(res.roomName)) && !voiceAuthorized(r.Context(), string(res.roomName), claims.Identity, claims.Video) {
++		return res, http.StatusForbidden, rtc.ErrPermissionDenied
++	}
++

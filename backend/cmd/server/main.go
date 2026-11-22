@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ghptc/whiterun-live/backend/internal/config"
+	"github.com/ghptc/whiterun-live/backend/internal/discord"
 	"github.com/ghptc/whiterun-live/backend/internal/httpapi"
 	"github.com/ghptc/whiterun-live/backend/internal/rooms"
 )
@@ -36,10 +37,26 @@ func main() {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/", httpapi.New(cfg.LiveKitURL))
-	rooms.New(rooms.Config{APIKey: cfg.APIKey, APISecret: cfg.APISecret, AdminKey: cfg.AdminKey, LocalPlayerKey: cfg.LocalPlayerKey, HTTPURL: cfg.LiveKitURL, WSURL: cfg.WSURL, AppOrigin: cfg.AppOrigin}).Register(mux)
+	api := rooms.New(rooms.Config{APIKey: cfg.APIKey, APISecret: cfg.APISecret, AdminKey: cfg.AdminKey, LocalPlayerKey: cfg.LocalPlayerKey, HTTPURL: cfg.LiveKitURL, WSURL: cfg.WSURL, AppOrigin: cfg.AppOrigin})
+	dc, err := discord.Load(cfg.AppOrigin, cfg.APIKey, cfg.APISecret, cfg.LocalPlayerKey)
+	if err != nil {
+		logger.Error("invalid Discord configuration", "error", err)
+		os.Exit(1)
+	}
+	if dc == nil || dc.Fixture {
+		api.Register(mux)
+	} else {
+		api.RegisterNative(mux)
+	}
+	if dc != nil {
+		api.RegisterDiscord(mux, dc)
+	}
 	server := &http.Server{Addr: cfg.Addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if dc != nil {
+		go api.ReconcileDiscord(ctx)
+	}
 	failures := make(chan error, 1)
 	go func() { failures <- server.ListenAndServe() }()
 	logger.Info("server starting", "address", cfg.Addr)

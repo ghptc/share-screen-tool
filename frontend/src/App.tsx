@@ -5,7 +5,7 @@ import ScreenSharing from './ScreenSharing'
 import type { JoinResult } from './Rooms'
 import './player.css'
 
-function Player() {
+function Player({ channel }: {channel?: string}) {
   const [session, setSession] = useState<{ room: Room; credentials: JoinResult } | null>(null)
   const [state, setState] = useState('Connecting')
   const [error, setError] = useState('')
@@ -43,7 +43,7 @@ function Player() {
       joining = true
       setError('')
       try {
-        const response = await fetch('/player/join', {
+        const response = await fetch(channel ? '/api/discord/'+channel+'/join' : '/player/join', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: '{}',
@@ -51,9 +51,13 @@ function Player() {
           signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]),
         })
         if (controller.signal.aborted) return
+        if (channel && response.status === 401) {
+          window.location.replace('/api/discord/auth/'+channel)
+          return
+        }
         if (response.status === 403 || response.status === 404) {
           setState('Unavailable')
-          setError('Local access is unavailable. Open the player from its localhost address.')
+          setError(channel ? 'Connect to the associated Discord voice channel to watch.' : 'Local access is unavailable. Open the player from its localhost address.')
           return
         }
         if (!response.ok) throw new Error()
@@ -84,7 +88,7 @@ function Player() {
       window.clearTimeout(timer)
       disposeRoom()
     }
-  }, [attempt])
+  }, [attempt, channel])
   return (
     <main className="player" aria-label="Whiterun Live player">
       <header className="player-header">
@@ -104,6 +108,7 @@ function Player() {
       {session ? (
         <ScreenSharing
           player
+          channel={channel}
           room={session.room}
           canPublish={session.credentials.canPublish}
           nativeAudioControl={session.credentials.nativeAudioControl}
@@ -126,6 +131,8 @@ function Player() {
 
 export default function App() {
   const url = new URL(window.location.href)
+  const channel = /^\/r\/([A-Za-z0-9_-]{32})$/.exec(url.pathname)
+  if(channel) return <Player channel={channel[1]} />
   const invitation = ['room', 'invite', 'publish'].some(
     (k) => url.searchParams.has(k) || new URLSearchParams(url.hash.slice(1)).has(k),
   )

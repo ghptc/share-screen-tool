@@ -1,0 +1,38 @@
+# Explicit, loopback-only development fixture. Use with compose.yaml.
+services:
+  livekit:
+    environment:
+      DISCORD_ADMISSION_URL: http://backend:8080/internal/discord/admit
+      DISCORD_ADMISSION_KEY: ${DISCORD_ADMISSION_KEY:?Set a unique SFU admission key}
+  backend:
+    environment:
+      WHITERUN_ENV: development
+      DISCORD_MODE: simulator
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:5173}
+      DISCORD_CHANNELS: 2001/3001,2001/3002,2002/3001
+      DISCORD_ROOM_KEY: ${DISCORD_ROOM_KEY:?Set a persistent room mapping key}
+      DISCORD_VOICE_KEY: ${DISCORD_VOICE_KEY:?Set a private voice service key}
+      DISCORD_VOICE_URL: http://discord-fixture:8091
+      DISCORD_ADMISSION_KEY: ${DISCORD_ADMISSION_KEY}
+      DISCORD_CLIENT_ID: fixture
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:?Set the fixture OAuth client secret}
+  discord-fixture:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    entrypoint: ["/discord-fixture"]
+    environment:
+      WHITERUN_ENV: development
+      DISCORD_MODE: simulator
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:5173}
+      DISCORD_CHANNELS: 2001/3001,2001/3002,2002/3001
+      DISCORD_ROOM_KEY: ${DISCORD_ROOM_KEY}
+      DISCORD_VOICE_KEY: ${DISCORD_VOICE_KEY}
+      DISCORD_CLIENT_ID: fixture
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET}
+      DISCORD_FIXTURE_KEY: ${DISCORD_FIXTURE_KEY:?Set a separate simulator control key}
+    ports:
+      - "127.0.0.1:${DISCORD_FIXTURE_PORT:-18091}:8091"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]

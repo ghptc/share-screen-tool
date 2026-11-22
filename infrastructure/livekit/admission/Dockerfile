@@ -6,6 +6,7 @@ RUN tar -xzf /tmp/livekit.tgz --strip-components=1 && go mod download
 COPY track-admission.patch /tmp/track-admission.patch
 RUN apk add --no-cache patch && patch -p1 < /tmp/track-admission.patch
 COPY screen_slots*.go pkg/rtc/
+COPY discord_access.go pkg/service/
 RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 go test pkg/rtc/screen_slots*.go && CGO_ENABLED=0 go build -trimpath -o /livekit-server ./cmd/server
 FROM livekit/livekit-server:v1.13.11
 COPY --from=builder /livekit-server /livekit-server

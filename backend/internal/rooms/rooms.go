@@ -35,6 +35,7 @@ type entry struct {
 	Joins       *rate.Limiter
 }
 type API struct {
+	discord        *channelAccess
 	cfg            Config
 	mu             sync.Mutex
 	rooms          map[string]entry
@@ -51,7 +52,7 @@ func New(cfg Config) *API {
 }
 
 func (a *API) Register(mux *http.ServeMux) {
-	a.registerNative(mux)
+	a.RegisterNative(mux)
 	if len(a.cfg.LocalPlayerKey) >= 32 {
 		mux.Handle("POST /local/join", a.guard(http.HandlerFunc(a.localJoin)))
 	}

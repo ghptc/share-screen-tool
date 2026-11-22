@@ -24,7 +24,7 @@ type nativeSession struct {
 	Claimed, Revoked, Watching bool
 }
 
-func (a *API) registerNative(mux *http.ServeMux) {
+func (a *API) RegisterNative(mux *http.ServeMux) {
 	mux.Handle("POST /native-audio/sessions", a.guard(http.HandlerFunc(a.createNative)))
 	mux.Handle("POST /native-audio/claim", a.guard(http.HandlerFunc(a.claimNative)))
 	mux.Handle("POST /native-audio/{session}/watch", a.guard(http.HandlerFunc(a.watchOwner)))
@@ -91,6 +91,11 @@ func (a *API) nativeContext(ctx context.Context, room string) (context.Context, 
 func (a *API) screenActive(ctx context.Context, owner nativeOwner, screen string) bool {
 	if !a.now().Before(owner.Expires) {
 		return false
+	}
+	if strings.HasPrefix(owner.Room, "dc-") {
+		if grant, ok := a.validDiscord(ctx, owner.Room, owner.Identity); !ok || !grant.publishing {
+			return false
+		}
 	}
 	ctx, err := a.nativeContext(ctx, owner.Room)
 	if err != nil {
@@ -164,7 +169,7 @@ func (a *API) claimNative(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.nativeMu.Unlock()
-	if found == nil || (input.LocalOnly && found.Owner.Room != localRoom) || !a.screenActive(r.Context(), found.Owner, found.Screen) {
+	if found == nil || (input.LocalOnly && found.Owner.Room != localRoom && !(a.discord != nil && strings.HasPrefix(found.Owner.Room, "dc-"))) || !a.screenActive(r.Context(), found.Owner, found.Screen) {
 		fail(w, 403, "Pairing code is invalid, expired, or its screen ended")
 		return
 	}
