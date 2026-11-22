@@ -101,10 +101,12 @@ export default function CloudflareStage({
   identity,
   control,
   onDenied,
+  onExpired,
 }: {
   channel: string
   identity: string
   control: string
+  onExpired: () => void
   onDenied: () => void
 }) {
   const [media, setMedia] = useState<Tile[]>([])
@@ -139,9 +141,13 @@ export default function CloudflareStage({
   const stop = useRef<() => void>(() => {})
   const denied = useRef(onDenied)
   denied.current = onDenied
+  const expired = useRef(onExpired)
+  expired.current = onExpired
 
   useEffect(() => {
     let active = true
+    const stateRequest = new AbortController()
+    let stateVersion: string | undefined
     let timer: ReturnType<typeof setTimeout>
     const flows = new Map<string, Flow>()
     const endpoint = '/api/discord/' + channel + '/media/'
@@ -149,11 +155,17 @@ export default function CloudflareStage({
       const response = await fetch(endpoint + op, {
         method: 'POST',
         cache: 'no-store',
-        signal: AbortSignal.timeout(25000),
+        signal: op === 'state'
+          ? AbortSignal.any([stateRequest.signal, AbortSignal.timeout(25000)])
+          : AbortSignal.timeout(25000),
         keepalive: op === 'close',
         headers: { 'Content-Type': 'application/json', 'X-Whiterun-Peer': identity },
         body: JSON.stringify(input),
       })
+      if (active && response.status === 410) {
+        dispose()
+        expired.current()
+      }
       if (active && (response.status === 401 || response.status === 403)) {
         dispose()
         denied.current()
@@ -189,6 +201,7 @@ export default function CloudflareStage({
     function dispose() {
       if (!active) return
       active = false
+      stateRequest.abort()
       clearTimeout(timer)
       for (const key of flows.keys()) remove(key)
     }
@@ -278,11 +291,14 @@ export default function CloudflareStage({
       }
     }
     async function poll() {
+      let delay = 2500
       try {
         const handles = Array.from(flows.values())
           .map((f) => f.handle)
           .filter(Boolean)
-        const state = await request('state', { handles })
+        const state = await request('state', { handles, version: stateVersion })
+        stateVersion = state.version
+        if (stateVersion) delay = 0
         if (!active) return
         const audio = Object.entries(state.audio ?? {}) as [string, string][]
         const list: string[] = [...state.publications, ...audio.map(([, handle]) => handle)]
@@ -301,7 +317,7 @@ export default function CloudflareStage({
           setMessage('Media connection interrupted.')
         }
       } finally {
-        if (active) timer = setTimeout(() => void poll(), 2500)
+        if (active) timer = setTimeout(() => void poll(), delay)
       }
     }
     window.addEventListener('pagehide', dispose)

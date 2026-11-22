@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ConnectionState, Room, RoomEvent } from 'livekit-client'
 import CloudflareStage from './CloudflareStage'
 import InvitationRooms from './InvitationRooms'
 import ScreenSharing from './ScreenSharing'
 import type { JoinResult } from './Rooms'
+import { endRoomEntry, rememberDeadline, roomEntry } from './roomEntry'
 import './player.css'
 
 function Player({ channel }: {channel?: string}) {
@@ -11,9 +12,28 @@ function Player({ channel }: {channel?: string}) {
   const [prototypePeer, setPrototypePeer] = useState<{identity: string; control: string} | null>(null)
   const [state, setState] = useState('Connecting')
   const [error, setError] = useState('')
+  const expireCurrent = useRef<() => void>(() => {})
   const [attempt, setAttempt] = useState(0)
   useEffect(() => {
     const controller = new AbortController()
+    let entry = channel ? roomEntry(channel) : undefined
+    let ended = false
+    let expiryTimer: number | undefined
+    function expire() {
+      if (ended) return
+      ended = true
+      if (entry) endRoomEntry(entry)
+      controller.abort()
+      window.clearTimeout(timer)
+      disposeRoom()
+      setState('Expired')
+      setError('')
+    }
+    expireCurrent.current = expire
+    function checkDeadline() {
+      if (entry?.ended || (entry?.deadline !== undefined && Date.now() >= entry.deadline)) expire()
+      return ended
+    }
     let room: Room | undefined
     let timer: number | undefined
     let failures = 0
@@ -42,18 +62,24 @@ function Player({ channel }: {channel?: string}) {
       timer = window.setTimeout(join, Math.min(15000, 800 * 2 ** Math.min(failures++, 5)))
     }
     async function join() {
-      if (controller.signal.aborted || joining) return
+      if (controller.signal.aborted || joining || checkDeadline()) return
       joining = true
       setError('')
       try {
+        const requestedAt = Date.now()
         const response = await fetch(channel ? '/api/discord/'+channel+'/join' : '/player/join', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...(entry && { 'X-Whiterun-Entry': entry.key }) },
           body: '{}',
           cache: 'no-store',
           signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]),
         })
-        if (controller.signal.aborted) return
+        if (controller.signal.aborted || checkDeadline()) return
+        if (entry?.deadline && response.status === 401) {
+          setState('Unavailable')
+          setError('Room authorization ended. Reopen the Discord link.')
+          return
+        }
         if (channel && response.status === 401) {
           window.location.replace('/api/discord/auth/'+channel)
           return
@@ -64,9 +90,13 @@ function Player({ channel }: {channel?: string}) {
           return
         }
         if (!response.ok) throw new Error()
-        const credentials: JoinResult & {transport?: string} = await response.json()
+        const credentials: JoinResult & { transport?: string; expiresAt: string; serverTime: string } = await response.json()
         if (controller.signal.aborted) return
-        if (channel && credentials.transport === 'cloudflare-prototype') {
+        if (entry && credentials.transport === 'cloudflare-prototype') {
+          const granted = rememberDeadline(entry, credentials.expiresAt, credentials.serverTime, requestedAt)
+          entry = granted
+          if (checkDeadline()) return
+          expiryTimer = window.setTimeout(expire, granted.deadline - Date.now())
           setPrototypePeer({identity:credentials.identity,control:credentials.nativeAudioControl ?? ''})
           setState('Connected')
           return
@@ -90,10 +120,15 @@ function Player({ channel }: {channel?: string}) {
       }
     }
     setState('Connecting')
+    window.addEventListener('pageshow', checkDeadline)
+    document.addEventListener('visibilitychange', checkDeadline)
     void Promise.resolve().then(join)
     return () => {
       controller.abort()
+      window.removeEventListener('pageshow', checkDeadline)
+      document.removeEventListener('visibilitychange', checkDeadline)
       window.clearTimeout(timer)
+      window.clearTimeout(expiryTimer)
       disposeRoom()
     }
   }, [attempt, channel])
@@ -113,7 +148,20 @@ function Player({ channel }: {channel?: string}) {
           {state}
         </span>
       </header>
-      {prototypePeer && channel ? <CloudflareStage key={prototypePeer.identity} channel={channel} identity={prototypePeer.identity} control={prototypePeer.control} onDenied={() => { setPrototypePeer(null); setState('Unavailable'); setError('Connect to the associated Discord voice channel to watch.') }} /> : session ? (
+      {prototypePeer && channel ? (
+        <CloudflareStage
+          key={prototypePeer.identity}
+          channel={channel}
+          identity={prototypePeer.identity}
+          control={prototypePeer.control}
+          onExpired={() => expireCurrent.current()}
+          onDenied={() => {
+            setPrototypePeer(null)
+            setState('Unavailable')
+            setError('Connect to the associated Discord voice channel to watch.')
+          }}
+        />
+      ) : session ? (
         <ScreenSharing
           player
           channel={channel}
@@ -124,9 +172,9 @@ function Player({ channel }: {channel?: string}) {
       ) : (
         <div className="player-empty">
           <span className="standby-screen" aria-hidden="true" />
-          <h2>{error ? 'Player unavailable' : state === 'Reconnecting' ? 'Reconnecting…' : 'Connecting…'}</h2>
-          {error && <p role="alert">{error}</p>}
-          {(error || state === 'Reconnecting') && (
+          <h2>{state === 'Expired' ? 'Session expired — reopen the link' : error ? 'Player unavailable' : state === 'Reconnecting' ? 'Reconnecting…' : 'Connecting…'}</h2>
+          {error && state !== 'Expired' && <p role="alert">{error}</p>}
+          {state !== 'Expired' && (error || state === 'Reconnecting') && (
             <button onClick={() => (error ? location.reload() : setAttempt((n) => n + 1))}>
               Retry connection
             </button>
