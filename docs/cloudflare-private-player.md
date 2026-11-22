@@ -40,6 +40,16 @@ Use a protected editor for the two systemd environment files. Enter one assignme
 | `bot.env` only | `DISCORD_BOT_TOKEN`. |
 | `tunnel.token` only | Plain connector token for the dedicated remotely managed tunnel. |
 
+Use the callback printed by `configure.mjs --callback`. Remove the final `/api/discord/callback` and enter the remaining literal HTTPS origin as `APP_ORIGIN` in **both** protected files. The generator sets the same value as `PLAYER_ORIGIN` in the Worker. The systemd units read their own environment files on start. The Cloudflare controller uses no LiveKit admission key. For the localhost profile's separate credential rotation, see [private Compose recovery](discord.md#diagnose-the-origin-and-rotate-exposed-credentials).
+
+After editing these files on an installed pilot host, apply the new origin to the controller and bot together. First confirm that the pilot has a dedicated bot application if the localhost bot is running concurrently. The tunnel configuration is independent of this change.
+
+```sh
+systemctl --user restart whiterun-pilot-controller.service whiterun-pilot-bot.service
+systemctl --user is-active whiterun-pilot-controller.service whiterun-pilot-bot.service
+curl -fsS http://127.0.0.1:18492/healthz
+```
+
 The controller listens on 127.0.0.1:18492 and the voice authority on 127.0.0.1:18491. No inbound host ports need opening. The user service manager must remain active for the duration of the pilot. The controller unit uses `KillMode=process` so its detached watchdog can finish provider cleanup after a stop or crash. Preserve the owner-only state directory through updates and rollback.
 
 ## 3. Connect the private route

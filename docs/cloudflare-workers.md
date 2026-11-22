@@ -4,14 +4,15 @@ The prepared private pilot uses Workers Static Assets and one HTTP Worker with a
 
 ## First deployment step
 
-Open **Workers & Pages** in the Cloudflare account that owns the Realtime SFU app. Copy **Your subdomain** and check the Workers plan in that account. From the repository root, the following read-only command prints the exact Discord redirect URI using the checked-in Worker name. Supply the account hostname shown in the dashboard. This step requires no tunnel or VPC Service ID. [Find the account subdomain](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/)
+Open **Workers & Pages** in the Cloudflare account that owns the Realtime SFU app. Copy **Your subdomain**, confirm Workers Free there, and check **Manage Account → Billing → Subscriptions** for a paid Workers subscription. Check the name `whiterun-private-player` is available or already belongs to this pilot before any upload. Treat other GitHub-connected Workers as separate deployments with their own routes, Access policies and build triggers. [Find the account subdomain](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/) · [Account billing](https://developers.cloudflare.com/billing/understand/how-billing-works/)
 
 ```sh
 read -r ACCOUNT_SUBDOMAIN
 node deploy/worker/configure.mjs --callback "$ACCOUNT_SUBDOMAIN"
+node deploy/worker/configure.mjs --prepare "$ACCOUNT_SUBDOMAIN"
 ```
 
-Use the printed URI in **Discord Developer Portal → OAuth2 → Redirects**. Keep hosted pilot activation pending until the signed-out copied-link and approved-tester checks pass on the Access-protected shell. [Manual stages and protected variable names](cloudflare-private-player.md)
+The first command after `read` prints the OAuth callback. The second writes the ignored `deploy/worker/wrangler.private.json` locally with the account-specific player origin, public routing and preview URLs disabled, and no controller binding. Both work before a tunnel or VPC Service exists. Use the printed URI in **Discord Developer Portal → OAuth2 → Redirects**. On the pilot host, set the corresponding `APP_ORIGIN` in both service environment files. Keep hosted pilot activation pending until the signed-out copied-link and approved-tester checks pass on the Access-protected shell. [Manual stages and protected variable names](cloudflare-private-player.md)
 
 ## Future multi-host recovery
 

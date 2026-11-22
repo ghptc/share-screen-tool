@@ -25,6 +25,23 @@ Keep `DISCORD_PRIVATE_ROOM_KEY` stable to preserve channel links across restarts
 
 For manual pairing in this private profile, set `SSL_CERT_FILE` on the desktop helper process to the exported project root certificate. The helper validates TLS independently of the browser. The public-IP EC2 profile uses the desktop’s ordinary public trust store.
 
+### Diagnose the origin and rotate exposed credentials
+
+Run `./scripts/prepare-discord-private --show-origins` from the repository root. It compares the launcher's Compose configuration with the running backend and bot. It prints the known localhost origin, masks custom values and reports credential presence by name only. Raw Compose configuration, full container inspection and process environments can disclose credentials in terminal history or recordings.
+
+The private backend and bot each declare `APP_ORIGIN: https://${DISCORD_PRIVATE_HOST:-localhost}:8443` in `compose.discord-private.yaml`. The launcher's protected `.env` supplies `DISCORD_PRIVATE_HOST`. Leaving it unset selects localhost. The workstation player and Discord simulator separately read `APP_ORIGIN`, which defaults to `http://localhost:5173`. Use that value in the checkout's `.env` for the standard workstation player. The hosted Worker uses its own configuration. [Worker pilot origins](cloudflare-private-player.md#2-prepare-the-one-origin-host)
+
+If the bot token and private LiveKit admission key appear in output, rotate both before the next pilot use. This interrupts the private stack's active sessions.
+
+1. In **Discord Developer Portal → the affected application → Bot → Reset Token**, reset the bot token. Enter the replacement in `DISCORD_BOT_TOKEN` using a protected editor for the checkout's owner-only `.env`. Update any other authorized consumer of that bot. Keep credentials out of command arguments and transcripts. [Discord bot setup](https://docs.discord.com/developers/quick-start/getting-started)
+2. In the same file, delete the entire `DISCORD_PRIVATE_ADMISSION_KEY` assignment, including any duplicate assignments. The launcher generates a fresh 32-byte random key for a missing assignment. It passes the new value as `DISCORD_ADMISSION_KEY` to both the backend and patched LiveKit. Retain the separate room mapping key.
+3. Run the commands below. The launcher validates the new credentials, then recreates the private services whose configuration changed and waits for readiness. A bare Compose restart keeps the old container environment. [Docker Compose restart](https://docs.docker.com/reference/cli/docker/compose/restart/)
+
+```sh
+./scripts/prepare-discord-private --start
+./scripts/prepare-discord-private --show-origins
+```
+
 ### Verify a real command and revocation
 
 Join an allowlisted voice channel with a test account. Invoke the guild's **/live** slash command from the permitted command channel, open the link and approve **Identify yourself**. A second account in that voice channel should open the same link and see the first account's active screen. Use a signed-out profile with a copy of the link, then sign in as a member in a different voice channel. The first should encounter Discord sign-in and the second should receive a voice-channel denial. Move the publisher while watching from the second authorized profile, then have the viewer leave voice. Confirm the screen ends, both departed sessions lose access, and reopening the saved link requires current membership. Repeat after a Gateway reconnect. Record outcomes and times without recording OAuth redirects, cookies or media tokens.
