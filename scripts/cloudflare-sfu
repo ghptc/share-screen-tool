@@ -58,7 +58,7 @@ def run_player(provider):
               "DISCORD_CHANNELS": "2001/3001", "DISCORD_CLIENT_ID": "fixture",
               **{k: secrets.token_hex(32) for k in ("DISCORD_CLIENT_SECRET", "DISCORD_VOICE_KEY", "DISCORD_ROOM_KEY")}}
     fixture = {**shared, "DISCORD_FIXTURE_ADDR": voice, "DISCORD_FIXTURE_KEY": secrets.token_hex(32)}
-    api = {**shared, **provider, "BACKEND_ADDR": backend, "DISCORD_VOICE_URL": "http://" + voice,
+    api = {**shared, **provider, "BACKEND_ADDR": backend, "WHITERUN_SFU_STATE_DIR": str(ROOT / ".local-player" / "cloudflare-ownership"), "DISCORD_VOICE_URL": "http://" + voice,
            "WHITERUN_MEDIA_TRANSPORT": "cloudflare-prototype", "DISCORD_ADMISSION_KEY": secrets.token_hex(32),
            "LOCAL_ADMIN_KEY": secrets.token_hex(32)}
     with tempfile.TemporaryDirectory(prefix="whiterun-sfu-") as temp:

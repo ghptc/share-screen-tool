@@ -19,6 +19,12 @@ import (
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if len(os.Args) == 3 && os.Args[1] == "sfu-watchdog" {
+		if cloudsfu.WatchController(os.Args[2]) != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) == 3 && os.Args[1] == "healthcheck" {
 		client := &http.Client{Timeout: 4 * time.Second}
 		res, err := client.Get(os.Args[2])
@@ -49,13 +55,23 @@ func main() {
 		logger.Error("invalid media profile", "error", err)
 		os.Exit(1)
 	}
+	var watchdogDone <-chan struct{}
 	if prototype {
 		media, err := cloudsfu.FromEnvironment()
 		if err != nil {
 			logger.Error("invalid SFU configuration", "error", err)
 			os.Exit(1)
 		}
-		api.EnableCloudflarePrototype(media)
+		recovery, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		guard, err := cloudsfu.StartGuard(recovery, os.Getenv("WHITERUN_SFU_STATE_DIR"), media)
+		cancel()
+		if err != nil {
+			logger.Error("cannot establish durable SFU ownership", "error", err)
+			os.Exit(1)
+		}
+		defer guard.Stop()
+		watchdogDone = guard.Done
+		api.EnableCloudflarePrototype(guard)
 		mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
 	} else {
 		mux.Handle("/", httpapi.New(cfg.LiveKitURL))
@@ -91,6 +107,12 @@ func main() {
 			logger.Error("server failed", "error", err)
 			os.Exit(1)
 		}
+	case <-watchdogDone:
+		logger.Error("SFU watchdog exited; closing controller")
+		server.Close()
+		stopMonitor()
+		<-monitorDone
+		os.Exit(1)
 	case <-ctx.Done():
 		drain := 5 * time.Second
 		if prototype {
