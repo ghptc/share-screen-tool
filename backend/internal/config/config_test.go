@@ -72,3 +72,16 @@ func TestPlayerOnlyOnConfiguredWorkstation(t *testing.T) {
 		}
 	}
 }
+
+func TestRealDiscordRequiresSecureMediaAndHasNoLocalOperator(t *testing.T) {
+	t.Setenv("LOCAL_ADMIN_KEY", "")
+	t.Setenv("DISCORD_MODE", "discord")
+	t.Setenv("LIVEKIT_WS_URL", "ws://media.test")
+	if _, err := Load(); err == nil {
+		t.Fatal("insecure native media URL accepted")
+	}
+	t.Setenv("LIVEKIT_WS_URL", "wss://media.test")
+	if _, err := Load(); err != nil {
+		t.Fatal(err)
+	}
+}
