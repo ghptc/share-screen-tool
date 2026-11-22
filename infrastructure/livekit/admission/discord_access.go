@@ -21,7 +21,7 @@ func protectedRoom(room string) bool { return strings.HasPrefix(room, "dc-") }
 
 func voiceAuthorized(ctx context.Context, room, identity string, grant *auth.VideoGrant) bool {
 	key := os.Getenv("DISCORD_ADMISSION_KEY")
-	if len(key) < 32 {
+	if len(key) < 32 || grant == nil {
 		return false
 	}
 	body, _ := json.Marshal(map[string]string{"Room": room, "Identity": identity})
@@ -29,6 +29,8 @@ func voiceAuthorized(ctx context.Context, room, identity string, grant *auth.Vid
 	if err != nil {
 		return false
 	}
+	// Admission is a read-only query over a pooled private connection.
+	req.Header["Idempotency-Key"] = []string{}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
 	res, err := voiceAdmissionHTTP.Do(req)
@@ -42,11 +44,11 @@ func voiceAuthorized(ctx context.Context, room, identity string, grant *auth.Vid
 	}
 	switch authz.Role {
 	case "viewer":
-		return grant == nil || !grant.GetCanPublish()
+		return !grant.GetCanPublish()
 	case "screen":
-		return grant == nil || !grant.GetCanPublish() || (len(grant.CanPublishSources) == 1 && grant.GetCanPublishSource(livekit.TrackSource_SCREEN_SHARE))
+		return !grant.GetCanPublish() || (len(grant.CanPublishSources) == 1 && grant.GetCanPublishSource(livekit.TrackSource_SCREEN_SHARE))
 	case "audio":
-		return grant == nil || (!grant.GetCanSubscribe() && grant.GetCanPublish() && len(grant.CanPublishSources) == 1 && grant.GetCanPublishSource(livekit.TrackSource_SCREEN_SHARE_AUDIO))
+		return (!grant.GetCanSubscribe() && grant.GetCanPublish() && len(grant.CanPublishSources) == 1 && grant.GetCanPublishSource(livekit.TrackSource_SCREEN_SHARE_AUDIO))
 	default:
 		return false
 	}

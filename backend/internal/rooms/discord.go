@@ -83,6 +83,9 @@ func (d *channelAccess) epoch(ctx context.Context, ref, user string) string {
 	if err != nil {
 		return ""
 	}
+	// This POST is a read. If an idle connection closes, Go can retry on a
+	// fresh connection within the same timeout and still require a live proof.
+	req.Header["Idempotency-Key"] = []string{}
 	req.Header.Set("Authorization", "Bearer "+d.c.VoiceKey)
 	req.Header.Set("Content-Type", "application/json")
 	res, err := d.client.Do(req)
@@ -225,6 +228,11 @@ func (a *API) validDiscord(ctx context.Context, room, id string) (roomAccess, bo
 	}
 	_, sessionOK := d.oauth.Session(b.session)
 	if !sessionOK || d.epoch(ctx, b.ref, b.user) != b.epoch {
+		// A canceled client request has no authority to revoke another socket.
+		// Deny this request. The independent SFU and API monitors keep checking.
+		if sessionOK && ctx.Err() != nil {
+			return roomAccess{}, false
+		}
 		d.mu.Lock()
 		_, registered := d.active[id]
 		delete(d.active, id)

@@ -1,11 +1,13 @@
 package rooms
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -102,6 +104,16 @@ func TestDiscordScopedRoomExchange(t *testing.T) {
 	if err != nil || registered.Subject != result.Identity || registered.ExpiresAt.Time.Sub(registered.IssuedAt.Time) != 45*time.Second || claims.Video.Room != "dc-"+ref || claims.Video.GetCanPublish() || !claims.Video.GetCanSubscribe() || claims.Video.GetCanPublishData() || claims.Video.RoomAdmin || claims.Video.RoomRecord {
 		t.Fatal("overbroad initial exchange")
 	}
+	// A canceled requesting socket cannot supply membership evidence for any
+	// subsequent request. The next request must independently verify the user.
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, ok := a.validDiscord(canceled, "dc-"+ref, result.Identity); ok {
+		t.Fatal("canceled check authorized")
+	}
+	if signal().Code != 200 {
+		t.Fatal("one canceled check destroyed the verified application session")
+	}
 	// The same cached, still-signed identity must fail the protected admission
 	// endpoint after departure and stay invalid after returning to the channel.
 	admit := func(key string) int {
@@ -132,5 +144,33 @@ func TestDiscordScopedRoomExchange(t *testing.T) {
 	restarted.RegisterDiscord(next, c)
 	if _, ok := restarted.discord.oauth.Session(session.Value); ok {
 		t.Fatal("session survived restart")
+	}
+}
+
+func TestFreshVoiceLookupAfterReusedConnectionCloses(t *testing.T) {
+	var attempts atomic.Int32
+	authority := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 2 {
+			conn, _, err := http.NewResponseController(w).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			conn.Close()
+			return
+		}
+		json.NewEncoder(w).Encode(discord.Presence{Channel: "22", Epoch: "active"})
+	}))
+	defer authority.Close()
+	dir, _ := discord.NewDirectory(strings.Repeat("q", 32), "11/22")
+	ref, _ := dir.Reference(discord.Channel{Guild: "11", Voice: "22"})
+	d := channelAccess{c: &discord.Config{Dir: dir, VoiceURL: authority.URL}, client: authority.Client()}
+	for i := 0; i < 2; i++ {
+		if got := d.epoch(t.Context(), ref, "33"); got != "active" {
+			t.Fatal("fresh authority did not verify membership after an idle connection closed")
+		}
+	}
+	if attempts.Load() != 3 {
+		t.Fatal("a fresh response was required")
 	}
 }
