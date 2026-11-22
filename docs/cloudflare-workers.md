@@ -1,0 +1,26 @@
+# Workers Free deployment plan
+
+**Planning only.** The current private player uses the Go backend and patched LiveKit. The hosted SFU prototype runs its signaling controller on one Linux workstation. A release on Workers needs a separate implementation and a private acceptance run.
+
+## Smallest viable split
+
+1. Serve the existing built player and immutable assets with Workers Static Assets. Keep one HTTPS origin for the document, API and OAuth callback. Register that exact callback in Discord before switching traffic. Bind only authentication, signaling and status paths to a Worker. Cache only static content. Serve OAuth and room responses with `Cache-Control: no-store`.
+2. Keep the existing Go Discord Gateway authority on an available host. It owns the bot token, guild snapshots and voice epochs. Have it authenticate its requests to the control plane, fence reconnects with a new epoch and send membership withdrawals. The Worker must require fresh authoritative membership for OAuth admission, media operations and session renewal. A stale or unreachable voice service closes admission. Retain the current code/PKCE flow, HttpOnly cookie and separate helper lease. Keep the SFU App Secret in a Worker secret binding.
+3. Assign one SQLite-backed Durable Object to each opaque channel room. In one transaction reserve at most four screens and bind each to its viewer session, voice epoch and helper. Commit the provider session and pending mutation before attaching media. Serialize changes per track and journal track closure until the provider acknowledges it. On restart, expire old grants and reconcile pending closures before re-opening admission. SQLite identifiers belong to the control plane. Browsers receive only scoped application handles and WebRTC descriptions.
+4. Replace the prototype's 2.5-second browser polling with authenticated change notifications. Use the Durable Object WebSocket Hibernation API for idle clients, coalesce lease renewals and schedule the earliest expiry with an alarm. A received audio/video packet travels directly between the client and SFU. The worker handles signaling. The native helper stays on the user's workstation with its existing consent model.
+5. Test quotas and partitions on a private staging origin before any cutover. Admit traffic only within an operating budget that leaves room for revocations. Monitor pending closures and the age of the oldest one independently of the signaling service. Exercise loss of the whole controller, exhausted Free allocations, a partition of the provider API, and recovery while a sender continues sending. A separate recovery authority must still be able to reach the provider and the current ownership records when the primary quota or host fails. Short application leases alone cannot interrupt an established media path. Retain the private LiveKit profile for rollback.
+
+## Published allowances
+
+Checked 2026-11-22. These are account/plan allowances. Remaining capacity and the account's SFU billing settings require verification by the account owner.
+
+| Component | Free allowance | Design consequence |
+| --- | --- | --- |
+| Workers | 100,000 dynamic requests/day, 10 ms CPU per request, 128 MB memory, 50 subrequests/request, six simultaneous outgoing connections/request | Measure OAuth cryptography, SDP processing and signaling under load. Keep media off the Worker. [Workers limits](https://developers.cloudflare.com/workers/platform/limits/) |
+| Static Assets | Free unlimited asset requests and 20,000 files per Free Worker version | Use direct asset matching. A route that always invokes a Worker consumes the dynamic quota. [Asset billing](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/) · [Limits](https://developers.cloudflare.com/workers/platform/limits/) |
+| Durable Objects Free | SQLite backend, 100,000 requests/day, 13,000 GB-s/day, 5 million rows read/day, 100,000 rows written/day, 5 GB total SQL storage | Include alarms, row writes for deletes and alarm scheduling, concurrent rooms, and active duration. Budget these separately from the calling Worker. [Durable Objects pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/) |
+| Realtime SFU + TURN | First 1,000 GB/month of combined egress, then USD 0.05/GB | Each additional viewer or subscribed screen adds egress. Free Workers allowances do not cap SFU charges. [Realtime pricing](https://developers.cloudflare.com/realtime/sfu/platform/pricing/) |
+
+At a nominal poll every 2.5 seconds, a continuously connected tab can make 34,560 state requests per day before signaling. Three such tabs reach 103,680 requests. One 4 Mb/s stream delivered to one viewer consumes about 1.8 GB/hour in decimal units before overhead and audio. Four such publishers each watching the other three generate twelve deliveries, about 21.6 GB/hour. One thousand GB would cover about 46 hours at that rate if the account had no other usage. Four incoming publishers alone do not determine the bill.
+
+Start with local Worker/DO simulation and deterministic voice-state and quota fixtures. A later private staging run needs explicit approval, budget monitoring and a real continuously sending revocation test. Keep all deployments manual.
