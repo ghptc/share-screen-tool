@@ -2,6 +2,17 @@
 
 The prepared private pilot uses Workers Static Assets and one HTTP Worker with a VPC Service binding to the existing Go controller. The controller and Discord Gateway authority run on one Linux host. It retains the fixed ten-hour admission, track journal and four-publisher limit. The account's Free plan supports this split during the Workers VPC beta. [Private deployment, acceptance and rollback](cloudflare-private-player.md) · [Workers VPC](https://developers.cloudflare.com/workers-vpc/get-started/)
 
+## First deployment step
+
+Open **Workers & Pages** in the Cloudflare account that owns the Realtime SFU app. Copy **Your subdomain** and check the Workers plan in that account. From the repository root, the following read-only command prints the exact Discord redirect URI using the checked-in Worker name. Supply the account hostname shown in the dashboard. This step requires no tunnel or VPC Service ID. [Find the account subdomain](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/)
+
+```sh
+read -r ACCOUNT_SUBDOMAIN
+node deploy/worker/configure.mjs --callback "$ACCOUNT_SUBDOMAIN"
+```
+
+Use the printed URI in **Discord Developer Portal → OAuth2 → Redirects**. Keep hosted pilot activation pending until the signed-out copied-link and approved-tester checks pass on the Access-protected shell. [Manual stages and protected variable names](cloudflare-private-player.md)
+
 ## Future multi-host recovery
 
 Moving room state into a SQLite-backed Durable Object is an option if multiple controllers are needed. It would require atomic slot allocation, pre-attachment ownership records, an independent process that retries closure, and tests across a whole-host outage and provider partition. The pilot uses no Durable Objects. A hibernating WebSocket could reduce requests further for larger audiences. Exhaustion of the edge quota must leave the origin watchdog able to reach the SFU control API. [Revocation limits](cloudflare-sfu.md)

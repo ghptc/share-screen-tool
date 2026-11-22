@@ -83,6 +83,12 @@ test('Access setup can expose only the shell before the pilot gets a private bin
   const dir = await mkdtemp(join(tmpdir(), 'whiterun-config-'))
   try {
     for (const name of ['configure.mjs', 'wrangler.json']) await copyFile(new URL(name, import.meta.url), join(dir, name))
+    for (const hostname of ['pilot', 'pilot.workers.dev']) {
+      const printed = execFileSync(process.execPath, ['configure.mjs', '--callback', hostname], { cwd: dir, encoding: 'utf8' })
+      assert.equal(printed.trim(), 'https://whiterun-private-player.pilot.workers.dev/api/discord/callback')
+    }
+    assert.throws(() => execFileSync(process.execPath, ['configure.mjs', '--callback', 'worker.pilot.workers.dev'], { cwd: dir, stdio: 'pipe' }))
+    await assert.rejects(readFile(join(dir, 'wrangler.private.json')), { code: 'ENOENT' })
     for (const stage of [undefined, '--access-setup', '--private-pilot']) {
       const args = ['configure.mjs','pilot','00000000-0000-4000-8000-000000000001']
       if (stage) args.push(stage)
