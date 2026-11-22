@@ -28,6 +28,35 @@ def compose_env():
     names = set(PRIVATE + PROVIDER + OPTIONAL + ("DISCORD_DENIED_USERS",))
     return {k: v for k, v in os.environ.items() if k not in names}
 
+def show_origins():
+    """Read the launcher's Compose model and compare only APP_ORIGIN with each running service."""
+    compose = ["docker", "compose", "--env-file", ".env", "-p", "whiterun-discord-private",
+               "-f", "compose.discord-private.yaml"]
+    options = dict(cwd=ROOT, env=compose_env(), capture_output=True, text=True, check=True)
+    # Even parser errors can contain dotenv lines. Keep both subprocess streams private.
+    services = json.loads(subprocess.run(compose + ["config", "--format", "json"], **options).stdout)["services"]
+    template = '{{range .Config.Env}}{{if eq (index (split . "=") 0) "APP_ORIGIN"}}{{println .}}{{end}}{{end}}'
+
+    def display(value):
+        if value == "https://localhost:8443":
+            return value
+        return "[custom value redacted]" if value else "[unset]"
+
+    for service in ("backend", "discord-bot"):
+        expected = services[service]["environment"].get("APP_ORIGIN")
+        print(service, "configured APP_ORIGIN", display(expected))
+        ids = subprocess.run(compose + ["ps", "-q", service], **options).stdout.split()
+        if not ids:
+            print(service, "not running")
+        for cid in ids:
+            line = subprocess.run(["docker", "inspect", "--format", template, cid], **options).stdout.rstrip("\n")
+            current = line.removeprefix("APP_ORIGIN=")
+            print(service, "running APP_ORIGIN", display(current),
+                  "(matches configuration)" if current == expected else "(differs from configuration)")
+    for service, name in (("discord-bot", "DISCORD_BOT_TOKEN"), ("backend", "DISCORD_ADMISSION_KEY"),
+                          ("livekit", "DISCORD_ADMISSION_KEY")):
+        print(service, name, "[set, redacted]" if services[service]["environment"].get(name) else "[unset]")
+
 def configuration(path=None):
     path = path or ROOT / ".env"
     with os.fdopen(os.open(path, os.O_RDWR | os.O_NOFOLLOW), "r+") as f:
@@ -161,9 +190,12 @@ def verify(ec2_file=None):
 
 if __name__ == "__main__":
     try:
+        if sys.argv[1:] == ["--show-origins"]:
+            show_origins()
+            sys.exit(0)
         ec2 = len(sys.argv) == 3 and sys.argv[1] == "--check-ec2"
         if not ec2 and sys.argv[1:] not in ([], ["--start"]):
-            sys.exit("Usage: prepare-discord-private [--start | --check-ec2 /path/to/production.env]")
+            sys.exit("Usage: prepare-discord-private [--show-origins | --start | --check-ec2 /path/to/production.env]")
         if not verify(Path(sys.argv[2]).absolute() if ec2 else None):
             sys.exit(1)
         if sys.argv[1:] == ["--start"]:

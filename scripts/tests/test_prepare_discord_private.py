@@ -2,8 +2,11 @@ import contextlib
 import importlib.machinery
 import importlib.util
 import io
+import json
+import os
 from pathlib import Path
 import secrets
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -15,6 +18,49 @@ loader.exec_module(prepare)
 
 
 class PrivateSetupTest(unittest.TestCase):
+    def test_origin_report_only_discloses_the_expected_localhost_url(self):
+        canary = "fixture-value-that-must-stay-private"
+        localhost = "https://localhost:8443"
+        custom = "https://tester:" + canary + "@example.invalid"
+        services = {
+            "backend": {"environment": {"APP_ORIGIN": localhost, "DISCORD_ADMISSION_KEY": canary}},
+            "discord-bot": {"environment": {"APP_ORIGIN": custom, "DISCORD_BOT_TOKEN": canary}},
+            "livekit": {"environment": {"DISCORD_ADMISSION_KEY": canary, "UNRELATED": canary}},
+        }
+
+        def docker(args, **kwargs):
+            self.assertTrue(kwargs["capture_output"] and kwargs["check"])
+            if "config" in args:
+                value = json.dumps({"services": services})
+            elif "ps" in args:
+                value = "container-id" if args[-1] == "backend" else ""
+            else:
+                self.assertEqual(args[:3], ["docker", "inspect", "--format"])
+                self.assertIn('"APP_ORIGIN"', args[3])
+                value = "APP_ORIGIN=" + custom + "\n"
+            return subprocess.CompletedProcess(args, 0, value, canary)
+
+        output = io.StringIO()
+        with patch.object(prepare.subprocess, "run", side_effect=docker), contextlib.redirect_stdout(output):
+            prepare.show_origins()
+        self.assertIn("backend configured APP_ORIGIN " + localhost, output.getvalue())
+        self.assertIn("backend running APP_ORIGIN [custom value redacted] (differs from configuration)", output.getvalue())
+        self.assertIn("discord-bot not running", output.getvalue())
+        self.assertIn("livekit DISCORD_ADMISSION_KEY [set, redacted]", output.getvalue())
+        self.assertNotIn(canary, output.getvalue())
+        self.assertNotIn("UNRELATED", output.getvalue())
+
+    def test_origin_report_suppresses_compose_error_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            docker = Path(tmp, "docker")
+            docker.write_text("#!/bin/sh\necho synthetic-parse-secret\necho synthetic-error-secret >&2\nexit 1\n")
+            docker.chmod(0o700)
+            result = subprocess.run([loader.path, "--show-origins"], capture_output=True, text=True,
+                                    env={**os.environ, "PATH": tmp + os.pathsep + os.environ["PATH"]})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr.strip(), "Private setup check unavailable (CalledProcessError)")
+
     def test_ec2_advertises_public_ip_but_binds_to_assigned_eni(self):
         with patch.object(prepare.subprocess, "run") as interfaces:
             interfaces.return_value.stdout = b'[{"addr_info":[{"local":"10.0.1.8","scope":"global"}]}]'
