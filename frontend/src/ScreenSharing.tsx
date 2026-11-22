@@ -223,7 +223,14 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, ch
         stopCapture(active); await unpublish(active); return
       }
       const initialTarget = {fps: quality.fps, height: 0}
-      if (quality.fps !== 60 && track.sender) await applyVideoTarget(track.sender, raw.getSettings(), initialTarget)
+      if (quality.fps !== 60 && track.sender) {
+        try {
+          await applyVideoTarget(track.sender, raw.getSettings(), initialTarget)
+        } catch {
+          initialTarget.fps = nativeTarget.fps
+          setError('Your screen is live. This browser could not apply the selected frame-rate limit.')
+        }
+      }
       setQuality(initialTarget); setSettings(raw.getSettings()); setSharing(true)
       setAudioStatus(!shareAudio ? 'Audio not requested.' : rawAudio ? 'Screen audio ended before publication. Video continues.' : offeredAudio
         ? 'Audio skipped because the browser could not confirm a tab with room audio excluded. On Linux, pair the native helper and select your game.'

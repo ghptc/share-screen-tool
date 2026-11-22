@@ -468,3 +468,18 @@ test('local native preview suppression uses participant identity, not names or a
  expect(document.querySelectorAll('audio')).toHaveLength(0)
  expect(screen.getByText(/Preview is silent only in this publisher session/)).toBeInTheDocument()
 })
+
+test('an unsupported sender limit leaves the approved screen live', async () => {
+  const publish = room.localParticipant.publishTrack.getMockImplementation()!
+  room.localParticipant.publishTrack.mockImplementationOnce((track, options) => {
+    Object.assign(track, { sender: { getParameters: () => ({ encodings: [] }) } })
+    return publish(track, options)
+  })
+  render(<ScreenSharing room={room as unknown as Room} canPublish player />)
+  fireEvent.click(screen.getByRole('button', { name: 'Quality' }))
+  fireEvent.change(screen.getByLabelText('Publish FPS'), { target: { value: '30' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Start sharing' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('screen is live')
+  expect(screen.getByRole('button', { name: 'Stop sharing' })).toBeEnabled()
+  expect(raw.stop).not.toHaveBeenCalled()
+})
