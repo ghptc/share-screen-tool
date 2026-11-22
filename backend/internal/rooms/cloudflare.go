@@ -83,6 +83,9 @@ func (a *API) cfOwner(r *http.Request) (roomAccess, string, int) {
 	if !ok || b.ref != ref || b.session != s.ID {
 		return roomAccess{}, "", 403
 	}
+	if !b.mediaRequests.Allow() {
+		return roomAccess{}, "", 429
+	}
 	b, ok = a.validDiscord(r.Context(), "dc-"+ref, id)
 	if !ok {
 		return roomAccess{}, "", 403

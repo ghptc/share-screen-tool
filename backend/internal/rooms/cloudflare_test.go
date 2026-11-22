@@ -229,3 +229,23 @@ func TestCloudflarePublisherLimitAndCleanup(t *testing.T) {
 		t.Fatal("retry failed")
 	}
 }
+
+func TestCloudflareViewersHaveIndependentHeartbeatBudgets(t *testing.T) {
+	f := newCFFixture(t, "https://player.test", &fakeMedia{})
+	cookie := f.login(t, "33")
+	ids := make([]string, 8)
+	for i := range ids {
+		code, body := f.post(t, cookie, "", f.ref, "join", cfInput{})
+		if code != 200 {
+			t.Fatal(code)
+		}
+		ids[i] = body["identity"].(string)
+	}
+	for range 4 {
+		for _, id := range ids {
+			if code, _ := f.post(t, cookie, id, f.ref, "state", cfInput{}); code != 200 {
+				t.Fatalf("viewer heartbeat %d", code)
+			}
+		}
+	}
+}

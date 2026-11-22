@@ -18,11 +18,13 @@ import (
 	"github.com/livekit/protocol/auth"
 	"github.com/livekit/protocol/livekit"
 	"github.com/twitchtv/twirp"
+	"golang.org/x/time/rate"
 )
 
 const discordTTL = 45 * time.Second
 
 type roomAccess struct {
+	mediaRequests                   *rate.Limiter
 	controlHash                     [32]byte
 	session, ref, user, epoch, name string
 	until                           time.Time
@@ -45,7 +47,7 @@ func (a *API) RegisterDiscord(m *http.ServeMux, c *discord.Config) {
 	d.oauth.Register(m)
 	m.Handle("POST /discord/{ref}/join", a.guard(http.HandlerFunc(a.discordJoin)))
 	if a.prototype != nil {
-		m.Handle("POST /discord/{ref}/media/{action}", a.guard(http.HandlerFunc(a.cfSignal)))
+		m.Handle("POST /discord/{ref}/media/{action}", a.guardRequests(http.HandlerFunc(a.cfSignal), false))
 	} else {
 		m.Handle("POST /discord/{ref}/publish", a.guard(http.HandlerFunc(a.discordPublish)))
 		m.Handle("POST /discord/{ref}/stop", a.guard(http.HandlerFunc(a.discordPublish)))
@@ -141,7 +143,11 @@ func (a *API) discordJoin(w http.ResponseWriter, r *http.Request) {
 		fail(w, 429, "Room session limit reached")
 		return
 	}
-	d.active[identity] = roomAccess{controlHash: sha256.Sum256([]byte(control)), session: s.ID, ref: ref, user: s.User, epoch: epoch, name: "Screen " + randomID(3), until: s.Until}
+	access := roomAccess{controlHash: sha256.Sum256([]byte(control)), session: s.ID, ref: ref, user: s.User, epoch: epoch, name: "Screen " + randomID(3), until: s.Until}
+	if a.prototype != nil {
+		access.mediaRequests = rate.NewLimiter(5, 20)
+	}
+	d.active[identity] = access
 	d.mu.Unlock()
 	if a.prototype != nil {
 		write(w, 200, map[string]string{"transport": "cloudflare-prototype", "identity": identity})

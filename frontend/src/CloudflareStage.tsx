@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { publish, subscribe, type Signal } from './cloudflarePeer'
 import { nativeTarget } from './videoQuality'
 
-type Flow = { pc: RTCPeerConnection; handle?: string; stream?: MediaStream }
+type Flow = { pc: RTCPeerConnection; handle?: string; stream?: MediaStream; timeout?: ReturnType<typeof setTimeout> }
 type Tile = { key: string; stream: MediaStream }
 const local = 'local'
 
@@ -51,6 +51,7 @@ export default function CloudflareStage({channel, identity, onDenied}: {
       const flow = flows.get(key)
       if (!flow) return
       flows.delete(key)
+      clearTimeout(flow.timeout)
       flow.pc.close()
       flow.stream?.getTracks().forEach(t => t.stop())
       if (flow.handle) void request('close', {handle:flow.handle}).catch(() => {})
@@ -78,6 +79,11 @@ export default function CloudflareStage({channel, identity, onDenied}: {
       pc.onconnectionstatechange = () => {
         if (flows.get(key) !== flow) return
         if (pc.connectionState === 'failed') remove(key)
+        clearTimeout(flow.timeout)
+        if (pc.connectionState === 'connecting' || pc.connectionState === 'disconnected')
+          flow.timeout = setTimeout(() => {
+            if (flows.get(key) === flow) { remove(key); setMessage('Media connection timed out.') }
+          }, 12000)
         if (key === local && pc.connectionState === 'connected')
           void signal('ready', {handle:flow.handle}).catch(() => remove(key))
       }
