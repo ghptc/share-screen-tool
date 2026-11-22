@@ -12,12 +12,12 @@ From the workstation, inspect port ownership, disk, memory and current load. Doc
 ssh aws-prod 'uname -m; docker compose version; df -h /opt /var/lib/docker; free -h; uptime; docker ps --format "{{.Names}}  {{.Ports}}"; sudo ss -lntup'
 ```
 
-| Existing security group / host firewall | Source | Use |
-| --- | --- | --- |
-| TCP 80 | Internet | Let’s Encrypt HTTP-01 issuance and automatic renewal. Ordinary HTTP paths return 404. |
-| TCP 8443 | Testers | HTTPS player, Discord callback, WebSocket signaling and helper API |
-| UDP 17892 | Testers | WebRTC multiplexed media |
-| TCP 17891 | Testers | ICE/TCP fallback |
+| EC2 inbound | Source for private trial | Compose destination | Use |
+| --- | --- | --- | --- |
+| TCP 80 | `0.0.0.0/0` | `player:8080/tcp` | Let’s Encrypt HTTP-01 issuance and automatic renewal. Ordinary HTTP paths return 404. |
+| TCP 8443 | Each tester’s public IPv4 `/32` | `player:8443/tcp` | HTTPS player, Discord callback, WebSocket signaling and helper API |
+| UDP 17892 | Each tester’s public IPv4 `/32` | `livekit:17892/udp` | WebRTC multiplexed media |
+| TCP 17891 | Each tester’s public IPv4 `/32` | `livekit:17891/tcp` | ICE/TCP fallback |
 
 Reserve these four ports on the instance’s **private interface**. If any belongs to Minecraft, COD4, Bardao or another service, stop this rollout and resolve the conflict with its owner. Keep existing SSH and game firewall rules. Backend 8080, bot 8091, SFU signaling 7880 and Caddy admin stay unpublished. The host needs outbound HTTPS to Discord and Let’s Encrypt. On this T3, the SFU has a 2-vCPU/2-GiB ceiling. Monitor host memory, game latency, network throughput and CPU credits during the trial. These limits have not been load-tested alongside the games. [LiveKit port requirements](https://docs.livekit.io/transport/self-hosting/ports-firewall/)
 
@@ -63,6 +63,29 @@ nano "$cfg"
 ```
 
 Set `PUBLIC_IPV4` to the **current public IP** used by viewers and advertised by LiveKit. Set `BIND_IPV4` to the **assigned private IPv4** on Ubuntu. Set `DISCORD_CHANNELS` to comma-separated `guild-id/voice-channel-id` pairs. In Discord Developer Portal → **OAuth2 → Redirects**, save exactly `https://PUBLIC_IPV4:8443/api/discord/callback`, substituting the numeric public address. Configure Guild Install with `bot` and `applications.commands`, install in the target guild and leave the Interactions Endpoint URL empty. The preflight creates independent media and service keys on EC2 and checks the real callback, identity and channels. Repeat it after saving Portal changes. Continue only on success. Docker administrators can read container credentials. Keep expanded Compose configuration and container environment dumps out of support logs. [Discord setup](discord.md) · [EC2 address translation](https://docs.aws.amazon.com/vpc/latest/userguide/VPC_Internet_Gateway.html)
+
+**First installation, before adding inbound rules.** Confirm credential rotation separately. Successful provider authentication proves validity but cannot establish that a previously disclosed credential was rotated. In the release directory, run just the backend and SFU with their host ports removed. A successful readiness check below proves the packaged SFU called the backend with its admission credential and denied the protected probe. It does not exercise real guild membership.
+
+```bash
+set -e
+gate=/opt/services/whiterun-live/shared/admission-only.yaml
+cat > "$gate" <<'YAML'
+services:
+  livekit:
+    ports: !reset []
+  player:
+    ports: !reset []
+YAML
+./compose -f "$gate" up -d --no-build --wait livekit backend
+for service in livekit backend; do
+  cid=$(./compose -f "$gate" ps -q "$service")
+  test "$(docker inspect -f '{{len .HostConfig.PortBindings}}' "$cid")" = 0
+done
+./compose -f "$gate" exec -T backend /server healthcheck http://127.0.0.1:8080/readyz
+echo 'Patched admission verified with zero published ports'
+```
+
+If any check fails, keep ingress closed and investigate. Before using the normal Compose command below, review **all** groups attached to the ENI in the EC2 console. Security groups combine their allowed sources. A tester-only rule cannot narrow an existing world-open permission on the same port. Account for port ranges, all-traffic rules and referenced groups or prefix lists. Leave shared game rules intact. Apply the four rules in the table only after the checks pass. TCP 80 carries the public ACME challenge. Start player and media access with the public IPv4 `/32` of each tester.
 
 ```bash
 set -e
@@ -137,3 +160,33 @@ Budget from the sum of **delivered** audio/video bitrates. Each 1 Mb/s sustained
 | Four publishers each watching the other three | 12 | 43.2 GB | 1,296 GB | $179.40 | $194.40 |
 
 Extra viewers add deliveries. Use measured outbound bytes including audio, retransmissions and protocol overhead for billing forecasts. Existing instance, storage, public IP, and possible T3 Unlimited surplus CPU charges are separate from these transfer estimates.
+
+### Measure network usage and charges
+
+Take an interface snapshot before and after the trial. Inside the release directory on EC2, Compose statistics show per-container network I/O since container creation. The interface includes other services; container counters also include internal traffic.
+
+```bash
+iface=$(ip -4 route show default | awk 'NR==1 {print $5}')
+date -u; ip -s link show dev "$iface"
+./compose stats --no-stream
+```
+
+From an operator workstation with read access, query the instance's five-minute outbound byte totals for the last hour. For inbound bytes, replace `NetworkOut` with `NetworkIn`. This measures all instance interfaces and workloads. [EC2 network metrics](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/viewing_metrics_with_cloudwatch.html)
+
+```bash
+read -rp 'EC2 instance ID: ' instance
+aws cloudwatch get-metric-statistics --region sa-east-1 --namespace AWS/EC2 \
+  --metric-name NetworkOut --dimensions "Name=InstanceId,Value=$instance" \
+  --start-time "$(date -u -d '1 hour ago' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" \
+  --period 300 --statistics Sum --query 'Datapoints[].[Timestamp,Sum,Unit]' --output table
+```
+
+For billing, query the last seven completed UTC days. This selects São Paulo internet egress and groups it by service across the visible billing scope. Credit entries may be recorded separately. Check **Billing → Credits** for remaining balance, eligible services and expiry, and **Bills** for applied credits. Billing data can lag usage by a day or more. Cost Explorer API requests can incur a charge. [Cost and usage API](https://docs.aws.amazon.com/cli/latest/reference/ce/get-cost-and-usage.html) · [Cost Explorer pricing](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/pricing/) · [AWS credits](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/credits.html)
+
+```bash
+aws ce get-cost-and-usage --region us-east-1 \
+  --time-period "Start=$(date -u -d '7 days ago' +%F),End=$(date -u +%F)" \
+  --granularity DAILY --metrics UsageQuantity UnblendedCost \
+  --filter '{"Dimensions":{"Key":"USAGE_TYPE","Values":["SAE1-DataTransfer-Out-Bytes"]}}' \
+  --group-by Type=DIMENSION,Key=SERVICE --output json
+```
