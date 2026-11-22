@@ -15,7 +15,7 @@ services:
       DISCORD_VOICE_URL: http://discord-fixture:8091
       DISCORD_ADMISSION_KEY: ${DISCORD_ADMISSION_KEY}
       DISCORD_CLIENT_ID: fixture
-      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:?Set the fixture OAuth client secret}
+      DISCORD_CLIENT_SECRET: ${DISCORD_FIXTURE_CLIENT_SECRET:?Set the fixture OAuth client secret}
   discord-fixture:
     build:
       context: .
@@ -29,7 +29,7 @@ services:
       DISCORD_ROOM_KEY: ${DISCORD_ROOM_KEY}
       DISCORD_VOICE_KEY: ${DISCORD_VOICE_KEY}
       DISCORD_CLIENT_ID: fixture
-      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET}
+      DISCORD_CLIENT_SECRET: ${DISCORD_FIXTURE_CLIENT_SECRET}
       DISCORD_FIXTURE_KEY: ${DISCORD_FIXTURE_KEY:?Set a separate simulator control key}
     ports:
       - "127.0.0.1:${DISCORD_FIXTURE_PORT:-18091}:8091"

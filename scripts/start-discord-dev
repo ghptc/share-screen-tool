@@ -11,7 +11,7 @@ with open('.env','a+') as f:
     os.fchmod(f.fileno(),0o600)
     f.seek(0)
     config = f.read() or Path('.env.example').read_text()
-    for name in ('DISCORD_ROOM_KEY','DISCORD_ADMISSION_KEY','DISCORD_VOICE_KEY','DISCORD_CLIENT_SECRET','DISCORD_FIXTURE_KEY'):
+    for name in ('DISCORD_ROOM_KEY','DISCORD_ADMISSION_KEY','DISCORD_VOICE_KEY','DISCORD_FIXTURE_CLIENT_SECRET','DISCORD_FIXTURE_KEY'):
         if not re.search(r'^'+name+r'=.+$',config,re.M):
             line=name+'='+secrets.token_hex(32)
             config=re.sub(r'^'+name+r'=$',line,config,flags=re.M) if re.search(r'^'+name+r'=$',config,re.M) else config.rstrip()+'\n'+line+'\n'
