@@ -149,6 +149,7 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
     if ([...room.localParticipant.videoTrackPublications.values(), ...room.localParticipant.audioTrackPublications.values()].some(publication => publication.source === Track.Source.ScreenShare || publication.source === Track.Source.ScreenShareAudio)) {
       setError('A previous screen publication is still being removed. Wait or leave and rejoin before sharing again.'); return
     }
+    if (screens.length >= 4) { setError('All four screens are in use. You can keep watching and try again when a screen stops.'); return }
     if (!window.isSecureContext || !navigator.mediaDevices?.getDisplayMedia) { setError('Screen sharing requires a supported browser on localhost or HTTPS.'); return }
     busyRef.current = true; setBusy('starting'); setError(''); setNotice('')
     const ticket = ++generation.current
@@ -238,7 +239,10 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, pl
         stopCapture(active)
         await unpublish(active).catch(() => {})
       } else { captured?.getTracks().forEach(track => track.stop()) }
-      if (mounted.current && ticket === generation.current) setError(captureError(cause))
+      if (mounted.current && ticket === generation.current) {
+        const full = [...room.remoteParticipants.values()].flatMap(p => [...p.videoTrackPublications.values()]).filter(p => p.source === Track.Source.ScreenShare).length >= 4
+        setError(full ? 'All four screens are in use. You can keep watching and try again when a screen stops.' : captureError(cause))
+      }
     } finally {
       if (active && active.track.mediaStreamTrack.readyState === 'ended' && owned.current === active) owned.current = null
       busyRef.current = false
