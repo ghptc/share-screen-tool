@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
+    "build:player": "VITE_NATIVE_AUDIO_MODE=pair npm run build -- --outDir ../dist/screen-share-player --emptyOutDir",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "test:e2e": "playwright test"

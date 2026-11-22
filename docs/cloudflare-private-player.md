@@ -11,7 +11,7 @@ For the running pilot, use the [Screen Share migration and rollback procedure](s
 Use the existing Go toolchain, Linux user systemd and a supported Node installation. Start at the repository root. All Wrangler commands in this section run locally.
 
 ```sh
-(cd frontend && npm ci && VITE_NATIVE_AUDIO_MODE=pair npm run build)
+(cd frontend && npm ci && npm run build:player)
 (cd deploy/worker && npm ci && npm test && npm run bundle)
 node frontend/smoke/private-guild.mjs --check-setup
 ```

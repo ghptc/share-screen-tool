@@ -6,7 +6,7 @@
   "preview_urls": false,
   "observability": { "enabled": false },
   "assets": {
-    "directory": "../../frontend/dist",
+    "directory": "../../dist/screen-share-player",
     "binding": "ASSETS",
     "run_worker_first": ["/", "/index.html", "/r/*", "/api/*"]
   },

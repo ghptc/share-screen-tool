@@ -114,6 +114,7 @@ test('Access setup can expose only the shell before the pilot gets a private bin
     execFileSync(process.execPath, ['configure.mjs', '--prepare', 'pilot.workers.dev'], { cwd: dir })
     const prepared = JSON.parse(await readFile(join(dir, 'wrangler.screen-share.json'), 'utf8'))
     assert.equal(prepared.name, 'screen-share-player')
+    assert.equal(prepared.assets.directory, '../../dist/screen-share-player')
     assert.equal(prepared.vars.PLAYER_ORIGIN, 'https://screen-share-player.pilot.workers.dev')
     assert.equal(prepared.workers_dev, false)
     assert.equal(prepared.preview_urls, false)

@@ -6,6 +6,7 @@ The replacement Worker is `screen-share-player`. Steve builds each `/live` link 
 | --- | --- | --- |
 | Origin | `https://whiterun-private-player.gabrielhpittacosta.workers.dev` | `https://screen-share-player.gabrielhpittacosta.workers.dev` |
 | Discord redirect | Existing origin plus `/api/discord/callback` | `https://screen-share-player.gabrielhpittacosta.workers.dev/api/discord/callback` |
+| Local asset bundle | `frontend/dist` | `dist/screen-share-player` |
 | Generated Worker config | `deploy/worker/wrangler.private.json` | `deploy/worker/wrangler.screen-share.json` |
 | User services | `whiterun-pilot-controller`, `whiterun-pilot-bot` | `screen-share-controller`, `screen-share-bot` |
 
@@ -17,7 +18,7 @@ Run each stage manually after approval. Use one shell at the repository root. Be
 account=gabrielhpittacosta.workers.dev
 worker_config=deploy/worker/wrangler.screen-share.json
 wrangler=deploy/worker/node_modules/.bin/wrangler
-(cd frontend && npm ci && VITE_NATIVE_AUDIO_MODE=pair npm run build)
+(cd frontend && npm ci && npm run build:player)
 (cd deploy/worker && npm ci && npm test)
 node deploy/worker/configure.mjs --prepare "$account"
 node deploy/worker/configure.mjs --callback "$account"
