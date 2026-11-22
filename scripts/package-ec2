@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Assemble a release from committed sources. This command has no remote target.
+set -euo pipefail
+umask 077
+if [[ $# != 1 ]]; then echo 'Usage: scripts/package-ec2 OUTPUT_DIRECTORY' >&2; exit 2; fi
+root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
+revision=$(git -C "$root" rev-parse HEAD)
+mkdir -p -- "$1"
+dest=$(realpath -- "$1")
+if [[ -e "$dest/$revision" ]]; then echo 'This release directory already exists.' >&2; exit 1; fi
+work=$(mktemp -d "$dest/.build-XXXXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+mkdir "$work/src" "$work/package"
+git -C "$root" archive "$revision" -- backend frontend infrastructure .dockerignore deploy/ec2 scripts/prepare-discord-private | tar -x -C "$work/src"
+cd "$work/src"
+images=()
+build() {
+  local tag="whiterun-live/$1:$revision"
+  docker build --platform linux/amd64 --label "org.opencontainers.image.revision=$revision" --tag "$tag" --file "$2" "$3"
+  images+=("$tag")
+}
+build sfu infrastructure/livekit/admission/Dockerfile infrastructure/livekit/admission
+build backend backend/Dockerfile .
+build player infrastructure/discord-player/Dockerfile .
+cp deploy/ec2/{compose,compose.yaml,Caddyfile} scripts/prepare-discord-private "$work/package"
+cd "$work/package"
+printf '%s\n' "$revision" > RELEASE
+docker image save "${images[@]}" | gzip -1 > images.tar.gz
+sha256sum RELEASE compose compose.yaml Caddyfile prepare-discord-private images.tar.gz > SHA256SUMS
+mv -T -- "$work/package" "$dest/$revision"
+printf 'Manual deployment package: %s/%s\n' "$dest" "$revision"
