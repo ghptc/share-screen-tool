@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { publish, ScreenIceGatheringTimeout, subscribe, type Signal } from './cloudflarePeer'
 import DesktopAudio from './DesktopAudio'
+import NativeAudio from './NativeAudio'
 import { readAudioPreference, writeAudioPreference } from './gameAudioSession'
 import { applyVideoTarget, nativeTarget, type VideoTarget } from './videoQuality'
 import PublishQuality from './PublishQuality'
@@ -117,6 +118,8 @@ export default function CloudflareStage({
     () => readAudioPreference('whiterun.gameAudio.enabled') !== 'off',
   )
   const [audioOpen, setAudioOpen] = useState(false)
+  const pairNativeAudio = import.meta.env.VITE_NATIVE_AUDIO_MODE === 'pair' ||
+    !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)
   const [audioStatus, setAudioStatus] = useState('')
   const audioControls = useRef<HTMLDivElement>(null)
   const [blocked, setBlocked] = useState<Set<string>>(() => new Set())
@@ -446,7 +449,9 @@ export default function CloudflareStage({
           role="region"
           aria-label="Audio controls"
         >
-          {screen && audioEnabled && (
+          {screen && audioEnabled && (pairNativeAudio ? (
+            <NativeAudio key={screen} screen={screen} control={control} />
+          ) : (
             <DesktopAudio
               key={screen}
               open={audioOpen}
@@ -455,7 +460,7 @@ export default function CloudflareStage({
               onStatus={setAudioStatus}
               onOffer={setOffer}
             />
-          )}
+          ))}
           {screen && audioEnabled && audioStatus && <small role="status">{audioStatus}</small>}
           {tiles.map(
             (tile, i) =>

@@ -76,15 +76,15 @@ export default function NativeAudio({ control, screen, status }: { control?: str
   if (!control) return null
   return <section aria-label="Native system audio">
     <h4>Native system audio (Linux)</h4>
-    <p role="status">{status || 'Native helper not connected.'}</p>
-    <p>To share a Linux game, start screen sharing and pair the helper. Select the game in your terminal. Your headset plays the game and the participants you unmute.</p>
+    {status && <p role="status">{status}</p>}
+    <p>Pair the helper on the Linux computer sharing this screen, then select the application there.</p>
     <button disabled={!screen || !!session || pending} onClick={() => void start()}>Pair native audio helper</button>
     {pending && <p role="status">Creating native audio pairing…</p>}
     {session && <>
       {watchReady ? <>
         <label>One-time native audio pairing JSON<input type="password" autoComplete="off" readOnly value={pair} /></label>
         <button onClick={() => void copyPairingCode()}>Copy pairing code</button>
-        <p>Run your installed helper with <code>--list-applications</code>, then <code>--start --application SERIAL</code> with your game's number. Paste this single-use code into the helper within one minute.</p>
+        <p>Run your installed helper with <code>--list-applications</code>. Select the game’s serial with <code>--start --application SERIAL</code>. Pipe the code from <code>systemd-ask-password</code> into the helper within one minute.</p>
       </> : <p role="status">Connecting to the native audio session…</p>}
       <button onClick={() => void stop()}>Stop native audio session</button>
     </>}
