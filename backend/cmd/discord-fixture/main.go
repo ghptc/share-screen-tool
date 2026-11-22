@@ -3,6 +3,7 @@ package main
 import (
 	"github.com/ghptc/whiterun-live/backend/internal/discord"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,6 +23,14 @@ func main() {
 		log.Fatal("independent fixture control key required")
 	}
 	state := discord.FixtureState{User: "1001", Guild: "2001", Channel: "3001", Online: true}
-	s := http.Server{Addr: ":8091", Handler: discord.Simulator(c, key, state), ReadTimeout: 4 * time.Second, WriteTimeout: 5 * time.Second, ReadHeaderTimeout: 3 * time.Second}
+	addr := ":8091" // Container listener for the existing development Compose network.
+	if local := os.Getenv("DISCORD_FIXTURE_ADDR"); local != "" {
+		host, _, err := net.SplitHostPort(local)
+		if err != nil || !net.ParseIP(host).IsLoopback() {
+			log.Fatal("DISCORD_FIXTURE_ADDR must be a loopback listener")
+		}
+		addr = local
+	}
+	s := http.Server{Addr: addr, Handler: discord.Simulator(c, key, state), ReadTimeout: 4 * time.Second, WriteTimeout: 5 * time.Second, ReadHeaderTimeout: 3 * time.Second}
 	log.Fatal(s.ListenAndServe())
 }

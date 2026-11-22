@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""Run the isolated Cloudflare prototype or its two-browser test."""
+import argparse
+import os
+from pathlib import Path
+import re
+import secrets
+import signal
+import socket
+import stat
+import subprocess
+import tempfile
+import time
+import urllib.request
+
+ROOT = Path(__file__).resolve().parents[1]
+NAMES = ("CLOUDFLARE_SFU_APP_ID", "CLOUDFLARE_SFU_APP_SECRET")
+# No provider credentials, VITE_* variables, or browser debugging flags go to JS.
+TOOLS = {k: os.environ[k] for k in (
+    "HOME", "PATH", "LANG", "TMPDIR", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY",
+    "GOCACHE", "GOPATH", "GOMODCACHE", "PLAYWRIGHT_BROWSERS_PATH",
+) if k in os.environ}
+
+
+def credentials(path):
+    found = {k: os.environ[k] for k in NAMES if os.environ.get(k)}
+    if len(found) < len(NAMES) and path.exists():
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError:
+            raise SystemExit("Protected configuration could not be opened") from None
+        with os.fdopen(fd) as src:
+            meta = os.fstat(src.fileno())
+            if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_mode & 0o077:
+                raise SystemExit("Use an owner-only regular configuration file")
+            for line in src:
+                key, sep, value = line.strip().removeprefix("export ").partition("=")
+                if sep and key in NAMES and key not in found:
+                    found[key] = value.strip().strip('"').strip("'")
+    invalid = [k for k, pattern in zip(NAMES, (r"[A-Fa-f0-9]{32}", r"[A-Za-z0-9_~.+/=-]{16,512}"))
+               if not re.fullmatch(pattern, found.get(k, ""))]
+    if invalid:
+        raise SystemExit("Missing or invalid configuration: " + ", ".join(invalid))
+    return found
+
+
+def run_player(provider):
+    origin = "http://localhost:5191"
+    voice = "127.0.0.1:18491"
+    backend = "127.0.0.1:18492"
+    for port in (5191, 18491, 18492):
+        with socket.socket() as probe:
+            try:
+                probe.bind(("127.0.0.1", port))
+            except OSError:
+                raise SystemExit(f"Port {port} is already in use") from None
+    shared = {**TOOLS, "APP_ORIGIN": origin, "WHITERUN_ENV": "development", "DISCORD_MODE": "simulator",
+              "DISCORD_CHANNELS": "2001/3001", "DISCORD_CLIENT_ID": "fixture",
+              **{k: secrets.token_hex(32) for k in ("DISCORD_CLIENT_SECRET", "DISCORD_VOICE_KEY", "DISCORD_ROOM_KEY")}}
+    fixture = {**shared, "DISCORD_FIXTURE_ADDR": voice, "DISCORD_FIXTURE_KEY": secrets.token_hex(32)}
+    api = {**shared, **provider, "BACKEND_ADDR": backend, "DISCORD_VOICE_URL": "http://" + voice,
+           "WHITERUN_MEDIA_TRANSPORT": "cloudflare-prototype", "DISCORD_ADMISSION_KEY": secrets.token_hex(32),
+           "LOCAL_ADMIN_KEY": secrets.token_hex(32)}
+    with tempfile.TemporaryDirectory(prefix="whiterun-sfu-") as temp:
+        for name in ("server", "discord-fixture"):
+            subprocess.run(["go", "build", "-o", f"{temp}/{name}", f"./cmd/{name}"],
+                           cwd=ROOT / "backend", env=TOOLS, check=True)
+        children = []
+        try:
+            children.append(subprocess.Popen([f"{temp}/discord-fixture"], env=fixture))
+            children.append(subprocess.Popen([f"{temp}/server"], env=api))
+            children.append(subprocess.Popen(
+                ["node", "node_modules/vite/bin/vite.js", "--host", "127.0.0.1", "--port", "5191", "--strictPort"],
+                cwd=ROOT / "frontend", env={**TOOLS, "APP_ORIGIN": origin, "API_PROXY_TARGET": "http://" + backend}))
+            for _ in range(80):
+                if any(p.poll() is not None for p in children):
+                    raise SystemExit("A prototype process exited during startup")
+                try:
+                    with urllib.request.urlopen(origin + "/api/healthz", timeout=0.5) as res:
+                        if res.status == 200:
+                            break
+                except OSError:
+                    time.sleep(0.1)
+            else:
+                raise SystemExit("Prototype startup timed out")
+            command = urllib.request.Request("http://" + voice + "/live",
+                                             headers={"Authorization": "Bearer " + fixture["DISCORD_FIXTURE_KEY"]})
+            with urllib.request.urlopen(command, timeout=2) as reply:
+                link = reply.read(512).decode().removeprefix("Watch or share: ").strip()
+            if not re.fullmatch(re.escape(origin) + r"/r/[A-Za-z0-9_-]{32}", link):
+                raise SystemExit("Fixture did not resolve the voice channel")
+            print("Open in a private browser window: " + link, flush=True)
+            while all(p.poll() is None for p in children):
+                time.sleep(0.25)
+            raise SystemExit("A prototype process exited")
+        finally:
+            # Keep voice authority alive until the backend finishes closing its media.
+            for child in reversed(children):
+                if child.poll() is None:
+                    child.terminate()
+                    try:
+                        child.wait(timeout=45)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mode", choices=("test-local", "test-hosted", "player"))
+    parser.add_argument("--env-file", type=Path, default=ROOT / ".env")
+    parser.add_argument("--browser", choices=("chromium", "firefox"), default="chromium")
+    args = parser.parse_args()
+    provider = {} if args.mode == "test-local" else credentials(args.env_file)
+    if args.mode == "player":
+        run_player(provider)
+        return
+    subprocess.run(["npm", "run", "build"], cwd=ROOT / "frontend", env=TOOLS, check=True)
+    mode = "loopback" if args.mode == "test-local" else "cloudflare"
+    subprocess.run(["go", "test", "-v", "-count=1", "-run", "^TestTwoBrowserMedia$", "./internal/rooms"],
+                   cwd=ROOT / "backend", env={**TOOLS, **provider, "WHITERUN_SFU_MEDIA_TEST": mode,
+                                               "E2E_BROWSER": args.browser}, check=True)
+
+
+if __name__ == "__main__":
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, interrupt)
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(error.returncode) from None
