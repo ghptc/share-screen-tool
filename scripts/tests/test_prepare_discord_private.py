@@ -15,6 +15,14 @@ loader.exec_module(prepare)
 
 
 class PrivateSetupTest(unittest.TestCase):
+    def test_ec2_advertises_public_ip_but_binds_to_assigned_eni(self):
+        with patch.object(prepare.subprocess, "run") as interfaces:
+            interfaces.return_value.stdout = b'[{"addr_info":[{"local":"10.0.1.8","scope":"global"}]}]'
+            self.assertTrue(prepare.ec2_addresses("1.2.3.4", "10.0.1.8"))
+            self.assertFalse(prepare.ec2_addresses("1.2.3.4", "10.0.1.9"))
+            self.assertFalse(prepare.ec2_addresses("10.0.1.8", "1.2.3.4"))
+            self.assertFalse(prepare.ec2_addresses("1.2.3.4", "0.0.0.0"))
+
     def test_preserves_operator_configuration_and_generated_keys(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(prepare, "ROOT", Path(tmp)):
             path = Path(tmp, ".env")

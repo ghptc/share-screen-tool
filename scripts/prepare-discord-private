@@ -19,7 +19,7 @@ PRIVATE = ("DISCORD_PRIVATE_ROOM_KEY", "DISCORD_PRIVATE_ADMISSION_KEY", "DISCORD
            "DISCORD_MEDIA_KEY", "DISCORD_MEDIA_SECRET")
 PROVIDER = ("DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET", "DISCORD_PUBLIC_KEY", "DISCORD_BOT_TOKEN",
             "DISCORD_CHANNELS")
-OPTIONAL = ("DISCORD_PRIVATE_HOST", "DISCORD_PRIVATE_IP", "DISCORD_FIXTURE_CLIENT_SECRET",
+OPTIONAL = ("DISCORD_PRIVATE_HOST", "DISCORD_PRIVATE_IP", "PUBLIC_IPV4", "BIND_IPV4", "DISCORD_FIXTURE_CLIENT_SECRET",
             "DISCORD_ROOM_KEY", "DISCORD_VOICE_KEY", "DISCORD_ADMISSION_KEY", "DISCORD_FIXTURE_KEY",
             "LOCAL_ADMIN_KEY", "LOCAL_PLAYER_KEY")
 SNOWFLAKE = re.compile(r"[1-9][0-9]{16,19}")
@@ -28,8 +28,8 @@ def compose_env():
     names = set(PRIVATE + PROVIDER + OPTIONAL + ("DISCORD_DENIED_USERS",))
     return {k: v for k, v in os.environ.items() if k not in names}
 
-def configuration():
-    path = ROOT / ".env"
+def configuration(path=None):
+    path = path or ROOT / ".env"
     with os.fdopen(os.open(path, os.O_RDWR | os.O_NOFOLLOW), "r+") as f:
         info = os.fstat(f.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
@@ -44,8 +44,8 @@ def configuration():
     # Explicitly select this file even when the calling shell has overrides.
     names = PRIVATE + PROVIDER + OPTIONAL
     model = {"services": {"check": {"image": "unused", "environment": {k: "${" + k + ":-}" for k in names}}}}
-    result = subprocess.run(["docker", "compose", "--env-file", ".env", "-p", "whiterun-config-check", "-f", "-",
-                             "config", "--format", "json"], input=json.dumps(model), text=True, cwd=ROOT,
+    result = subprocess.run(["docker", "compose", "--env-file", str(path), "-p", "whiterun-config-check", "-f", "-",
+                             "config", "--format", "json"], input=json.dumps(model), text=True, cwd=path.parent,
                             env=compose_env(), capture_output=True)
     if result.returncode:
         sys.exit("Cannot parse protected configuration")
@@ -76,8 +76,19 @@ def used_by_fixture(secret):
             return True
     return False
 
-def verify():
-    conf = configuration()
+def ec2_addresses(public, bind):
+    try:
+        pub, eni = ipaddress.IPv4Address(public), ipaddress.IPv4Address(bind)
+    except ValueError:
+        return False
+    if not pub.is_global or pub.is_multicast or pub == eni or eni.is_loopback or eni.is_unspecified:
+        return False
+    interfaces = subprocess.run(["ip", "-j", "-4", "addr", "show"], capture_output=True, check=True)
+    return any(a.get("local") == bind and a.get("scope") == "global"
+               for i in json.loads(interfaces.stdout) for a in i.get("addr_info", []))
+
+def verify(ec2_file=None):
+    conf = configuration(ec2_file)
     checks = []
     def check(label, ok):
         print(label, "OK" if ok else "PENDING")
@@ -89,10 +100,11 @@ def verify():
         print("Missing configuration")
         print("\n".join(missing))
     credentials = PRIVATE + ("DISCORD_CLIENT_SECRET", "DISCORD_BOT_TOKEN")
-    check("Independent private credentials", all(len(conf[k]) >= 32 for k in PRIVATE)
+    if not check("Independent private credentials", all(len(conf[k]) >= 32 for k in PRIVATE)
           and all(conf[k] and conf[k] == conf[k].strip() for k in credentials)
           and len({conf[k] for k in credentials}) == len(credentials)
-          and not ({conf[k] for k in credentials} & {conf[k] for k in OPTIONAL if conf[k]}))
+          and not ({conf[k] for k in credentials} & {conf[k] for k in OPTIONAL if conf[k]})):
+        return False
     app_id = conf["DISCORD_CLIENT_ID"]
     bot = conf["DISCORD_BOT_TOKEN"]
     if not check("Bot credential and application metadata format",
@@ -105,8 +117,8 @@ def verify():
                  and app.get("verify_key") == conf["DISCORD_PUBLIC_KEY"].lower()):
         return False
     check("Gateway interaction delivery", not app.get("interactions_endpoint_url"))
-    host = conf["DISCORD_PRIVATE_HOST"] or "localhost"
-    bind = conf["DISCORD_PRIVATE_IP"]
+    host = conf["PUBLIC_IPV4"] if ec2_file else (conf["DISCORD_PRIVATE_HOST"] or "localhost")
+    bind = conf["BIND_IPV4"] if ec2_file else conf["DISCORD_PRIVATE_IP"]
     labels = host.split(".")
     hostname_ok = (len(host) <= 253 and all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels))
     bind_ok = not bind and host == "localhost"
@@ -116,6 +128,8 @@ def verify():
             bind_ok = not addr.is_unspecified and not addr.is_multicast and addr.is_loopback == (host == "localhost")
         except ValueError:
             pass
+    if ec2_file:
+        bind_ok = ec2_addresses(host, bind)
     check("Private HTTPS host and media binding", hostname_ok and bind_ok)
     check("Exact OAuth callback registered", "https://" + host + ":8443/api/discord/callback" in (app.get("redirect_uris") or []))
     install = (app.get("integration_types_config") or {}).get("0", {}).get("oauth2_install_params") or app.get("install_params") or {}
@@ -147,9 +161,10 @@ def verify():
 
 if __name__ == "__main__":
     try:
-        if sys.argv[1:] not in ([], ["--start"]):
-            sys.exit("Usage: scripts/prepare-discord-private [--start]")
-        if not verify():
+        ec2 = len(sys.argv) == 3 and sys.argv[1] == "--check-ec2"
+        if not ec2 and sys.argv[1:] not in ([], ["--start"]):
+            sys.exit("Usage: prepare-discord-private [--start | --check-ec2 /path/to/production.env]")
+        if not verify(Path(sys.argv[2]).absolute() if ec2 else None):
             sys.exit(1)
         if sys.argv[1:] == ["--start"]:
             print("Starting the verified private guild profile", flush=True)
