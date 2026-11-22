@@ -10,6 +10,7 @@ import (
 )
 
 const stateWait = 12 * time.Second // Below the existing 20-second track liveness timeout.
+const idleStateWait = time.Minute
 
 type mediaState struct {
 	Publications []string          `json:"publications"`
@@ -73,7 +74,11 @@ func (a *API) cfState(w http.ResponseWriter, r *http.Request, b roomAccess, id s
 	g.waiting[id] = true
 	g.mu.Unlock()
 	defer func() { g.mu.Lock(); delete(g.waiting, id); g.mu.Unlock() }()
-	timeout := time.NewTimer(min(stateWait, b.until.Sub(a.now())))
+	wait := stateWait
+	if in.IdleWait && len(snapshot.Owned) == 0 {
+		wait = idleStateWait
+	}
+	timeout := time.NewTimer(min(wait, b.until.Sub(a.now())))
 	defer timeout.Stop()
 	reconcile := time.NewTicker(2 * time.Second)
 	defer reconcile.Stop()

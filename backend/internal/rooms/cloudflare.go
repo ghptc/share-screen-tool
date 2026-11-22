@@ -50,6 +50,7 @@ func (g *cfRegistry) controlFor(peer string) string {
 }
 
 type cfInput struct {
+	IdleWait    bool     `json:"idleWait,omitempty"`
 	Version     string   `json:"version,omitempty"`
 	Handles     []string `json:"handles,omitempty"`
 	Publication string   `json:"publication"`

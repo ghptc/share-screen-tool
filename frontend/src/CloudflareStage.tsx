@@ -148,6 +148,7 @@ export default function CloudflareStage({
     let active = true
     const stateRequest = new AbortController()
     let stateVersion: string | undefined
+    let retryDelay = 2500
     let timer: ReturnType<typeof setTimeout>
     const flows = new Map<string, Flow>()
     const endpoint = '/api/discord/' + channel + '/media/'
@@ -156,7 +157,7 @@ export default function CloudflareStage({
         method: 'POST',
         cache: 'no-store',
         signal: op === 'state'
-          ? AbortSignal.any([stateRequest.signal, AbortSignal.timeout(25000)])
+          ? AbortSignal.any([stateRequest.signal, AbortSignal.timeout(70000)])
           : AbortSignal.timeout(25000),
         keepalive: op === 'close',
         headers: { 'Content-Type': 'application/json', 'X-Whiterun-Peer': identity },
@@ -296,8 +297,9 @@ export default function CloudflareStage({
         const handles = Array.from(flows.values())
           .map((f) => f.handle)
           .filter(Boolean)
-        const state = await request('state', { handles, version: stateVersion })
+        const state = await request('state', { handles, version: stateVersion, idleWait: true })
         stateVersion = state.version
+        retryDelay = 2500
         if (stateVersion) delay = 0
         if (!active) return
         const audio = Object.entries(state.audio ?? {}) as [string, string][]
@@ -313,6 +315,8 @@ export default function CloudflareStage({
           if (!flows.has(key)) void watch(key, audio.find(([, handle]) => handle === key)?.[0])
       } catch {
         if (active) {
+          delay = retryDelay
+          retryDelay = Math.min(60000, retryDelay * 2)
           for (const key of flows.keys()) remove(key)
           setMessage('Media connection interrupted.')
         }

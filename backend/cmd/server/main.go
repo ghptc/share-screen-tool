@@ -86,7 +86,7 @@ func main() {
 	}
 	server := &http.Server{Addr: cfg.Addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	if prototype {
-		server.WriteTimeout = 30 * time.Second
+		server.WriteTimeout = 75 * time.Second // Includes the optional minute-long idle state wait.
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

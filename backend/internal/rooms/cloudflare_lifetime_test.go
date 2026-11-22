@@ -114,7 +114,7 @@ func TestRoomStateWaitRevocation(t *testing.T) {
 	_, entry := f.post(t, cookie, "entry", f.ref, "join", cfInput{})
 	id := entry["identity"].(string)
 	_, snapshot := f.post(t, cookie, id, f.ref, "state", cfInput{})
-	input := cfInput{Version: snapshot["version"].(string)}
+	input := cfInput{Version: snapshot["version"].(string), IdleWait: true}
 	result := make(chan int, 1)
 	go func() { code, _ := f.post(t, cookie, id, f.ref, "state", input); result <- code }()
 	for until := time.Now().Add(time.Second); ; {
@@ -158,9 +158,9 @@ func TestQuietRoomStateRequestBudget(t *testing.T) {
 	id := entry["identity"].(string)
 	_, snapshot := f.post(t, cookie, id, f.ref, "state", cfInput{})
 	begin := time.Now()
-	code, after := f.post(t, cookie, id, f.ref, "state", cfInput{Version: snapshot["version"].(string)})
+	code, after := f.post(t, cookie, id, f.ref, "state", cfInput{Version: snapshot["version"].(string), IdleWait: true})
 	elapsed := time.Since(begin)
-	if code != 200 || after["version"] != snapshot["version"] || elapsed < stateWait {
+	if code != 200 || after["version"] != snapshot["version"] || elapsed < idleStateWait {
 		t.Fatal("idle room returned early")
 	}
 	_, same := f.post(t, cookie, "tab", f.ref, "join", cfInput{})
