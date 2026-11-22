@@ -1,0 +1,80 @@
+package discord
+
+import (
+	"crypto/sha256"
+	"encoding/base64"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestOAuthTransaction(t *testing.T) {
+	d, _ := NewDirectory(strings.Repeat("m", 32), "12/34")
+	ref, _ := d.Reference(Channel{"12", "34"})
+	var challenge string
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			id, secret, _ := r.BasicAuth()
+			h := sha256.Sum256([]byte(r.FormValue("code_verifier")))
+			if id != "client" || secret != "private" || base64.RawURLEncoding.EncodeToString(h[:]) != challenge || r.FormValue("redirect_uri") != "https://player.test/api/discord/callback" {
+				http.Error(w, "Invalid", 403)
+				return
+			}
+			fmt.Fprint(w, `{"access_token":"mock","token_type":"Bearer"}`)
+		case "/user":
+			if r.Header.Get("Authorization") != "Bearer mock" {
+				http.Error(w, "Invalid", 403)
+				return
+			}
+			fmt.Fprint(w, `{"id":"456"}`)
+		}
+	}))
+	defer provider.Close()
+	o := NewOAuth(OAuthConfig{"https://player.test", "client", "private", provider.URL, provider.URL + "/token", provider.URL + "/user"}, d)
+	mux := http.NewServeMux()
+	o.Register(mux)
+	for _, valid := range []bool{false, true} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("GET", "/discord/auth/"+ref, nil))
+		loc, _ := url.Parse(rec.Header().Get("Location"))
+		state := loc.Query().Get("state")
+		challenge = loc.Query().Get("code_challenge")
+		if !valid {
+			state = "invalid"
+		}
+		r := httptest.NewRequest("GET", "/discord/callback?code=once&state="+state, nil)
+		r.AddCookie(rec.Result().Cookies()[0])
+		out := httptest.NewRecorder()
+		mux.ServeHTTP(out, r)
+		if !valid {
+			if out.Code != 403 {
+				t.Fatal("invalid state accepted")
+			}
+			continue
+		}
+		if out.Code != 303 || out.Header().Get("Location") != "/r/"+ref {
+			t.Fatal("exchange failed")
+		}
+		c := out.Result().Cookies()[1]
+		if !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteStrictMode {
+			t.Fatal("unsafe session")
+		}
+		if s, ok := o.Session(c.Value); !ok || s.User != "456" {
+			t.Fatal("identity mismatch")
+		}
+		again := httptest.NewRecorder()
+		mux.ServeHTTP(again, r)
+		if again.Code != 403 {
+			t.Fatal("reused oauth state")
+		}
+		o.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+		if _, ok := o.Session(c.Value); ok {
+			t.Fatal("expired session")
+		}
+	}
+}
