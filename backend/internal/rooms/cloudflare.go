@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,11 +16,13 @@ import (
 	"github.com/pion/sdp/v3"
 )
 
-// Each handle owns exactly one provider session and one video transceiver.
+// Each handle owns exactly one provider session and one media transceiver.
 // The mutex on an allocation serializes provider mutations, including teardown.
 type cfTrack struct {
 	operation                              sync.Mutex
 	handle, room, owner, user, publication string
+	screen, helper                         string // parent screen and native lease for an audio publication
+	audio                                  bool
 	session, mid                           string // guarded by operation
 	seen                                   time.Time
 	ready, closing, answered               bool // guarded by registry mutex
@@ -45,15 +48,30 @@ type cfInput struct {
 var midID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
 
 // Prevent SDP from adding an unaccounted m-line or changing a receiver into a publisher.
-func singleVideo(raw, mid, direction string) bool {
+func singleMedia(raw, mid, direction, kind string) bool {
 	var d sdp.SessionDescription
 	if !midID.MatchString(mid) || d.Unmarshal([]byte(raw)) != nil || len(d.MediaDescriptions) != 1 {
 		return false
 	}
 	m := d.MediaDescriptions[0]
 	id, ok := m.Attribute("mid")
-	if !ok || id != mid || m.MediaName.Media != "video" || m.MediaName.Port.Value == 0 {
+	if !ok || id != mid || m.MediaName.Media != kind || m.MediaName.Port.Value == 0 {
 		return false
+	}
+	if kind == "audio" {
+		// Every advertised audio payload in the helper offer must be stereo-capable Opus.
+		if len(m.MediaName.Formats) != 1 {
+			return false
+		}
+		opus := false
+		for _, a := range m.Attributes {
+			if a.Key == "rtpmap" && strings.EqualFold(a.Value, m.MediaName.Formats[0]+" opus/48000/2") {
+				opus = true
+			}
+		}
+		if !opus {
+			return false
+		}
 	}
 	count := 0
 	for _, attr := range m.Attributes {
@@ -92,11 +110,17 @@ func (a *API) cfOwner(r *http.Request) (roomAccess, string, int) {
 	}
 	return b, id, 200
 }
-func (g *cfRegistry) reserve(b roomAccess, id, source string, now time.Time) (*cfTrack, int) {
+func (g *cfRegistry) reserve(b roomAccess, id, source string, now time.Time, helper *nativeSession) (*cfTrack, int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if len(g.tracks) >= 512 {
 		return nil, 429
+	}
+	if helper != nil {
+		screen := g.tracks[helper.Screen]
+		if screen == nil || screen.room != b.ref || screen.owner != id || screen.audio || screen.publication != "" || screen.closing || !screen.ready {
+			return nil, 403
+		}
 	}
 	if source != "" {
 		pub := g.tracks[source]
@@ -109,9 +133,12 @@ func (g *cfRegistry) reserve(b roomAccess, id, source string, now time.Time) (*c
 		if t.room != b.ref {
 			continue
 		}
-		if t.publication == "" {
+		if helper != nil && t.screen == helper.Screen {
+			return nil, 409
+		}
+		if t.publication == "" && !t.audio {
 			slots++
-			if source == "" && t.user == b.user {
+			if helper == nil && source == "" && t.user == b.user {
 				return nil, 409
 			}
 		}
@@ -119,21 +146,31 @@ func (g *cfRegistry) reserve(b roomAccess, id, source string, now time.Time) (*c
 			return nil, 409
 		}
 	}
-	if source == "" && slots >= 4 {
+	if helper == nil && source == "" && slots >= 4 {
 		return nil, 409
 	}
 	t := &cfTrack{handle: randomID(18), room: b.ref, owner: id, user: b.user, publication: source, seen: now}
+	if helper != nil {
+		t.screen = helper.Screen
+		t.helper = helper.ID
+		t.audio = true
+	} else if source != "" {
+		t.audio = g.tracks[source].audio
+	}
 	// No other goroutine has a reference yet.
 	t.operation.Lock()
 	g.tracks[t.handle] = t
 	return t, 200
 }
 func (g *cfRegistry) retireLocked(t *cfTrack) {
+	if t.closing {
+		return
+	}
 	t.closing = true
 	if t.publication == "" {
 		for _, s := range g.tracks {
-			if s.publication == t.handle {
-				s.closing = true
+			if s.publication == t.handle || s.screen == t.handle {
+				g.retireLocked(s)
 			}
 		}
 	}
@@ -155,13 +192,17 @@ func (g *cfRegistry) closeTrack(ctx context.Context, t *cfTrack) bool {
 	g.mu.Unlock()
 	return true
 }
-func (a *API) cfNew(w http.ResponseWriter, r *http.Request, b roomAccess, id string, in cfInput, send bool) {
+func (a *API) cfNew(w http.ResponseWriter, r *http.Request, b roomAccess, id string, in cfInput, send bool, helper *nativeSession) {
 	g := a.prototype
-	if (send && (in.Publication != "" || !singleVideo(in.SDP, in.Mid, "sendonly"))) || (!send && in.Publication == "") {
-		fail(w, 400, "Expected one screen track")
+	kind := "video"
+	if helper != nil {
+		kind = "audio"
+	}
+	if (send && (in.Publication != "" || !singleMedia(in.SDP, in.Mid, "sendonly", kind))) || (!send && in.Publication == "") {
+		fail(w, 400, "Expected one authorized media track")
 		return
 	}
-	t, status := g.reserve(b, id, in.Publication, a.now())
+	t, status := g.reserve(b, id, in.Publication, a.now(), helper)
 	if status != 200 {
 		fail(w, status, "Screen unavailable")
 		return
@@ -200,6 +241,10 @@ func (a *API) cfNew(w http.ResponseWriter, r *http.Request, b roomAccess, id str
 		}
 	}
 	_, authorized := a.validDiscord(ctx, "dc-"+b.ref, id)
+	if helper != nil {
+		_, ok := a.cfHelper(r)
+		authorized = authorized && ok
+	}
 	g.mu.Lock()
 	if err != nil || !authorized || r.Context().Err() != nil {
 		g.retireLocked(t)
@@ -229,27 +274,32 @@ func (a *API) cfSignal(w http.ResponseWriter, r *http.Request) {
 	g := a.prototype
 	switch op {
 	case "publish", "subscribe":
-		a.cfNew(w, r, b, id, in, op == "publish")
+		a.cfNew(w, r, b, id, in, op == "publish", nil)
 		return
 	case "state":
 		g.mu.Lock()
 		list := []string{}
+		audio := map[string]string{}
 		owned := []string{}
 		for _, t := range g.tracks {
 			if t.room == b.ref && !t.closing {
 				if t.owner == id {
 					owned = append(owned, t.handle)
 				}
-				if t.owner == id && (t.ready || t.answered) && slices.Contains(in.Handles, t.handle) {
+				if t.helper == "" && t.owner == id && (t.ready || t.answered) && slices.Contains(in.Handles, t.handle) {
 					t.seen = a.now()
 				}
 				if t.publication == "" && t.ready && t.user != b.user {
-					list = append(list, t.handle)
+					if t.audio {
+						audio[t.screen] = t.handle
+					} else {
+						list = append(list, t.handle)
+					}
 				}
 			}
 		}
 		g.mu.Unlock()
-		write(w, 200, map[string]any{"publications": list, "owned": owned})
+		write(w, 200, map[string]any{"publications": list, "audio": audio, "owned": owned})
 		return
 	case "answer", "ready", "close":
 	default:
@@ -283,14 +333,18 @@ func (a *API) cfSignal(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "Track unavailable")
 		return
 	}
-	if op == "ready" && t.publication == "" {
+	if op == "ready" && t.publication == "" && !t.audio {
 		t.ready = true
 		t.seen = a.now()
 		g.mu.Unlock()
 		write(w, 200, struct{}{})
 		return
 	}
-	ok := op == "answer" && t.publication != "" && !t.answered && singleVideo(in.SDP, t.mid, "recvonly")
+	kind := "video"
+	if t.audio {
+		kind = "audio"
+	}
+	ok := op == "answer" && t.publication != "" && !t.answered && singleMedia(in.SDP, t.mid, "recvonly", kind)
 	g.mu.Unlock()
 	if !ok {
 		fail(w, 400, "Invalid track operation")
@@ -337,4 +391,35 @@ func (a *API) sweepCloudflare(ctx context.Context, shutdown bool) {
 		go func() { defer wg.Done(); g.closeTrack(ctx, t) }()
 	}
 	wg.Wait()
+}
+
+// The native lease can publish only its own parent's single audio track.
+func (a *API) cfHelper(r *http.Request) (nativeSession, bool) {
+	a.nativeMu.Lock()
+	defer a.nativeMu.Unlock()
+	s := a.nativeSessions[r.PathValue("session")]
+	if s == nil || !s.Claimed || !s.Watching || s.Revoked || !a.now().Before(s.Expires) || s.LeaseHash != bearerHash(r) {
+		return nativeSession{}, false
+	}
+	return *s, true
+}
+func (a *API) cfHelperPublish(w http.ResponseWriter, r *http.Request) {
+	s, ok := a.cfHelper(r)
+	if !ok {
+		fail(w, 403, "Audio authorization ended")
+		return
+	}
+	b, ok := a.validDiscord(r.Context(), s.Owner.Room, s.Owner.Identity)
+	if !ok {
+		fail(w, 403, "Voice authorization ended")
+		return
+	}
+	var in cfInput
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 96<<10))
+	d.DisallowUnknownFields()
+	if d.Decode(&in) != nil || d.Decode(new(any)) != io.EOF {
+		fail(w, 400, "Invalid audio offer")
+		return
+	}
+	a.cfNew(w, r, b, s.Owner.Identity, in, true, &s)
 }

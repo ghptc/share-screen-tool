@@ -47,6 +47,9 @@ func (a *API) RegisterDiscord(m *http.ServeMux, c *discord.Config) {
 	d.oauth.Register(m)
 	m.Handle("POST /discord/{ref}/join", a.guard(http.HandlerFunc(a.discordJoin)))
 	if a.prototype != nil {
+		a.RegisterNative(m)
+		m.Handle("POST /native-audio/{session}/ready", a.guard(http.HandlerFunc(a.leaseNative)))
+		m.Handle("POST /native-audio/{session}/publish", a.guard(http.HandlerFunc(a.cfHelperPublish)))
 		m.Handle("POST /discord/{ref}/media/{action}", a.guardRequests(http.HandlerFunc(a.cfSignal), false))
 	} else {
 		m.Handle("POST /discord/{ref}/publish", a.guard(http.HandlerFunc(a.discordPublish)))
@@ -149,13 +152,13 @@ func (a *API) discordJoin(w http.ResponseWriter, r *http.Request) {
 	}
 	d.active[identity] = access
 	d.mu.Unlock()
-	if a.prototype != nil {
-		write(w, 200, map[string]string{"transport": "cloudflare-prototype", "identity": identity})
-		return
-	}
 	a.nativeMu.Lock()
 	a.nativeOwners[sha256.Sum256([]byte(control))] = nativeOwner{room, identity, s.Until}
 	a.nativeMu.Unlock()
+	if a.prototype != nil {
+		write(w, 200, map[string]string{"transport": "cloudflare-prototype", "identity": identity, "nativeAudioControl": control})
+		return
+	}
 	write(w, 200, map[string]any{"token": "session", "identity": identity, "roomId": room, "serverUrl": d.c.Origin + "/api/discord/signal/" + identity, "canPublish": true, "nativeAudioControl": control})
 }
 
@@ -260,9 +263,7 @@ func (a *API) validDiscord(ctx context.Context, room, id string) (roomAccess, bo
 		d.mu.Unlock()
 		if registered {
 			d.oauth.Revoke(b.session)
-			if a.prototype != nil {
-				return roomAccess{}, false
-			}
+
 			a.nativeMu.Lock()
 			delete(a.nativeOwners, b.controlHash)
 			var helpers []string
@@ -272,6 +273,19 @@ func (a *API) validDiscord(ctx context.Context, room, id string) (roomAccess, bo
 				}
 			}
 			a.nativeMu.Unlock()
+			if g := a.prototype; g != nil {
+				g.mu.Lock()
+				for _, track := range g.tracks {
+					if track.owner == id {
+						g.retireLocked(track)
+					}
+				}
+				g.mu.Unlock()
+				for _, sid := range helpers {
+					a.revokeNative(sid)
+				}
+				return roomAccess{}, false
+			}
 			go func() {
 				for _, sid := range helpers {
 					a.revokeNative(sid)
