@@ -78,3 +78,25 @@ func TestOAuthTransaction(t *testing.T) {
 		}
 	}
 }
+
+func TestExpiredTransactionRequiresFreshDiscordLogin(t *testing.T) {
+	dir, err := NewDirectory(strings.Repeat("m", 32), "12/34")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := dir.Reference(Channel{"12", "34"})
+	o := NewOAuth(OAuthConfig{Origin: "https://player.test", AuthorizeURL: "https://discord.test/authorize"}, dir)
+	mux := http.NewServeMux()
+	o.Register(mux)
+	start := httptest.NewRecorder()
+	mux.ServeHTTP(start, httptest.NewRequest("GET", "/discord/auth/"+ref, nil))
+	location, _ := url.Parse(start.Header().Get("Location"))
+	o.now = func() time.Time { return time.Now().Add(6 * time.Minute) }
+	callback := httptest.NewRequest("GET", "/discord/callback?code=expired&state="+location.Query().Get("state"), nil)
+	callback.AddCookie(start.Result().Cookies()[0])
+	result := httptest.NewRecorder()
+	mux.ServeHTTP(result, callback)
+	if result.Code != http.StatusForbidden || len(o.sessions) != 0 {
+		t.Fatal("expired login resulted in an application session")
+	}
+}

@@ -25,7 +25,17 @@ services:
     ports: !override ["127.0.0.1:15173:5173"]
     volumes: !override ["$work/socket:/desktop:ro"]
 YAML
-compose=(docker compose -p "whiterun-audio-test-$$" -f compose.yaml -f "$work/compose.yaml")
+overlays=()
+if [[ "${DISCORD_VALIDATION:-0}" == 1 ]]; then
+  for key in DISCORD_ROOM_KEY DISCORD_VOICE_KEY DISCORD_ADMISSION_KEY DISCORD_CLIENT_SECRET DISCORD_FIXTURE_KEY; do
+    printf -v "$key" '%s' "$(openssl rand -hex 32)"
+    export "${key?}"
+  done
+  export DISCORD_FIXTURE_PORT=18191 DISCORD_FIXTURE_URL=http://127.0.0.1:18191
+  export DISCORD_TEST_PROJECT="whiterun-audio-test-$$"
+  overlays=(-f compose.discord-dev.yaml)
+fi
+compose=(docker compose -p "whiterun-audio-test-$$" -f compose.yaml "${overlays[@]}" -f "$work/compose.yaml")
 launcher_pid=''
 cleanup() {
   if [[ -n "$launcher_pid" ]]; then kill "$launcher_pid" 2>/dev/null || true; wait "$launcher_pid" 2>/dev/null || true; fi
