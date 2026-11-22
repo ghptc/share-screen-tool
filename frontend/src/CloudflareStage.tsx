@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
-import { publish, ScreenIceGatheringTimeout, subscribe, type Signal } from './cloudflarePeer'
+import { publish, ScreenIceGatheringError, subscribe, type Signal } from './cloudflarePeer'
 import DesktopAudio from './DesktopAudio'
 import NativeAudio from './NativeAudio'
 import { readAudioPreference, writeAudioPreference } from './gameAudioSession'
@@ -12,6 +12,7 @@ type Flow = {
   pc: RTCPeerConnection
   handle?: string
   stream?: MediaStream
+  cancelPublication?: AbortController
   timeout?: ReturnType<typeof setTimeout>
 }
 type Tile = { key: string; stream: MediaStream; audioFor?: string }
@@ -223,6 +224,7 @@ export default function CloudflareStage({
       if (!flow) return
       flows.delete(key)
       if (key === local) {
+        flow.cancelPublication?.abort()
         sender.current = undefined
         selectQuality({ fps: selectedQuality.current.fps, height: 0 })
       }
@@ -231,6 +233,15 @@ export default function CloudflareStage({
       flow.stream?.getTracks().forEach((t) => t.stop())
       if (flow.handle) void request('close', { handle: flow.handle }).catch(() => {})
       refresh()
+    }
+    function waitForConnection(key: string, flow: Flow) {
+      clearTimeout(flow.timeout)
+      flow.timeout = setTimeout(() => {
+        if (flows.get(key) === flow) {
+          remove(key)
+          setMessage('Media connection timed out.')
+        }
+      }, 12000)
     }
     function dispose() {
       if (!active) return
@@ -254,22 +265,23 @@ export default function CloudflareStage({
       }
       pc.onconnectionstatechange = () => {
         if (flows.get(key) !== flow) return
-        if (pc.connectionState === 'failed') remove(key)
-        clearTimeout(flow.timeout)
+        if (pc.connectionState === 'failed') {
+          remove(key)
+          if (key === local) setMessage('Media connection failed.')
+          return
+        }
         if (pc.connectionState === 'connecting' || pc.connectionState === 'disconnected')
-          flow.timeout = setTimeout(() => {
-            if (flows.get(key) === flow) {
-              remove(key)
-              setMessage('Media connection timed out.')
-            }
-          }, 12000)
-        if (key === local && pc.connectionState === 'connected')
+          waitForConnection(key, flow)
+        else clearTimeout(flow.timeout)
+        if (key === local && flow.handle && pc.connectionState === 'connected')
           void signal('ready', { handle: flow.handle })
             .then(() => {
               flow.ready = true
               refresh()
             })
-            .catch(() => remove(key))
+            .catch(() => {
+              if (flows.get(key) === flow) remove(key)
+            })
       }
       return { flow, signal }
     }
@@ -289,9 +301,13 @@ export default function CloudflareStage({
         }
         flow.stream = stream
         const [track] = stream.getVideoTracks()
-        track.onended = () => remove(local)
-        await publish(flow.pc, track, signal)
+        track.onended = () => {
+          if (flows.get(local) === flow) remove(local)
+        }
+        flow.cancelPublication = new AbortController()
+        await publish(flow.pc, track, signal, undefined, flow.cancelPublication.signal)
         if (!active || flows.get(local) !== flow) return
+        if (flow.pc.connectionState === 'new') waitForConnection(local, flow)
         sender.current = flow.pc.getSenders().find(s => s.track === track)
         if (sender.current && selectedQuality.current.fps !== nativeTarget.fps) {
           try {
@@ -308,7 +324,7 @@ export default function CloudflareStage({
         if (flows.get(local) === flow) {
           remove(local)
           if (active) {
-            if (e instanceof ScreenIceGatheringTimeout) setMessage(e.message)
+            if (e instanceof ScreenIceGatheringError) setMessage(e.message)
             else if (e instanceof DOMException && e.name === 'NotAllowedError') setMessage('Screen sharing was declined.')
             else setMessage('Screen sharing could not start.')
           }

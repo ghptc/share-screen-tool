@@ -4,35 +4,56 @@ export type Signal = (
   request: Record<string, unknown>,
 ) => Promise<{ handle: string; sdp: string }>
 
-export class ScreenIceGatheringTimeout extends Error {}
+export class ScreenIceGatheringError extends Error {}
 
-async function localSDP(
-  pc: RTCPeerConnection,
-  description: RTCSessionDescriptionInit,
-  timeoutError?: () => Error,
-) {
+async function waitForGathering(pc: RTCPeerConnection, cancel?: AbortSignal) {
+  cancel?.throwIfAborted()
+  if (pc.iceGatheringState === 'complete') return true
+  return new Promise<boolean>((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer)
+      pc.removeEventListener('icegatheringstatechange', onState)
+      cancel?.removeEventListener('abort', onAbort)
+    }
+    const onState = () => {
+      if (pc.iceGatheringState === 'complete') {
+        cleanup()
+        resolve(true)
+      }
+    }
+    const onAbort = () => {
+      cleanup()
+      reject(cancel?.reason)
+    }
+    const timer = setTimeout(() => {
+      cleanup()
+      resolve(false)
+    }, 8000)
+    pc.addEventListener('icegatheringstatechange', onState)
+    cancel?.addEventListener('abort', onAbort)
+    onState()
+  })
+}
+
+async function localSDP(pc: RTCPeerConnection, description: RTCSessionDescriptionInit) {
   await pc.setLocalDescription(description)
-  if (pc.iceGatheringState !== 'complete') {
-    await new Promise<void>((resolve, reject) => {
-      const finish = () => {
-        if (pc.iceGatheringState === 'complete') done()
-      }
-      const done = (error?: Error) => {
-        clearTimeout(timer)
-        pc.removeEventListener('icegatheringstatechange', finish)
-        error ? reject(error) : resolve()
-      }
-      const timer = setTimeout(() => {
-        done(timeoutError?.() ?? new Error('ICE gathering timed out'))
-      }, 8000)
-      pc.addEventListener('icegatheringstatechange', finish)
-      finish()
-    })
-  }
+  if (!await waitForGathering(pc)) throw new Error('ICE gathering timed out')
   return pc.localDescription!.sdp
 }
 
-async function screenOfferSDP(pc: RTCPeerConnection) {
+// The screen peer has one send-only video transceiver. Count RTP candidates from
+// its browser-generated offer, including host candidates represented by mDNS.
+function candidateTypes(sdp: string) {
+  const types = new Set<string>()
+  for (const line of sdp.split(/\r?\n/)) {
+    const candidate = /^a=candidate:\S+\s+1\s+(?:udp|tcp)\s+\d+\s+\S+\s+(\d+)\s+typ\s+(host|srflx|prflx|relay)(?:\s|$)/i.exec(line)
+    if (candidate && Number(candidate[1]) > 0 && Number(candidate[1]) <= 65535)
+      types.add(candidate[2].toLowerCase())
+  }
+  return types
+}
+
+async function screenOfferSDP(pc: RTCPeerConnection, cancel?: AbortSignal) {
   const offer = await pc.createOffer()
   const started = performance.now()
   let completeEvent = false
@@ -43,31 +64,28 @@ async function screenOfferSDP(pc: RTCPeerConnection) {
   const onCandidate = (event: RTCPeerConnectionIceEvent) => {
     if (event.candidate === null) endOfCandidates = true
   }
-  function report() {
-    // Project the current offer onto a fixed vocabulary. Never log the peer, SDP or ICE events.
-    const types = new Set<string>()
-    for (const line of pc.localDescription?.sdp.split(/\r?\n/) ?? []) {
-      if (!line.startsWith('a=candidate:')) continue
-      const fields = line.split(/\s+/)
-      if (fields[6] === 'typ' && ['host', 'srflx', 'prflx', 'relay'].includes(fields[7]))
-        types.add(fields[7])
-    }
+  pc.addEventListener('icegatheringstatechange', onState)
+  pc.addEventListener('icecandidate', onCandidate)
+  try {
+    await pc.setLocalDescription(offer)
+    const complete = await waitForGathering(pc, cancel)
+    cancel?.throwIfAborted()
+    // The SFU gets this single offer snapshot. Later candidates are never signaled.
+    const local = pc.localDescription
+    const types = candidateTypes(local?.sdp ?? '')
     const state = pc.iceGatheringState
     const stateLabel = ['new', 'gathering', 'complete'].includes(state) ? state : 'unknown'
     const summary = `Gathering state: ${stateLabel}. Elapsed: ${Math.round(performance.now() - started)} ms. ` +
       `Candidate types: ${[...types].join(', ') || 'none'}. ` +
       `Complete event: ${completeEvent}. Null candidate event: ${endOfCandidates}.`
     console.debug('Screen ICE. ' + summary)
-    return summary
-  }
-  pc.addEventListener('icegatheringstatechange', onState)
-  pc.addEventListener('icecandidate', onCandidate)
-  try {
-    const sdp = await localSDP(pc, offer, () => new ScreenIceGatheringTimeout(
-      'Screen sharing timed out waiting for ICE. ' + report(),
-    ))
-    report()
-    return sdp
+    if (local?.type !== 'offer' || types.size === 0) {
+      const message = complete
+        ? 'Screen sharing found no usable ICE candidate.'
+        : 'Screen sharing timed out waiting for ICE.'
+      throw new ScreenIceGatheringError(message + ' ' + summary)
+    }
+    return local.sdp
   } finally {
     pc.removeEventListener('icegatheringstatechange', onState)
     pc.removeEventListener('icecandidate', onCandidate)
@@ -79,12 +97,16 @@ export async function publish(
   track: MediaStreamTrack,
   send: Signal,
   encoding?: RTCRtpEncodingParameters,
+  cancel?: AbortSignal,
 ) {
   const tx = pc.addTransceiver(track, {
     direction: 'sendonly',
     ...(encoding && { sendEncodings: [encoding] }),
   })
-  const sdp = await screenOfferSDP(pc)
+  const sdp = await screenOfferSDP(pc, cancel)
+  cancel?.throwIfAborted()
+  if (track.readyState !== 'live' || pc.connectionState === 'closed' || pc.connectionState === 'failed')
+    throw new DOMException('Screen sharing ended.', 'AbortError')
   const result = await send('publish', { mid: tx.mid, sdp })
   await pc.setRemoteDescription({ type: 'answer', sdp: result.sdp })
   return result.handle
