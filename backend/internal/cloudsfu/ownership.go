@@ -160,9 +160,6 @@ func StartGuard(ctx context.Context, root string, c *Client) (*Guard, error) {
 			o.directory.Close()
 		}
 	}()
-	if err = o.recover(ctx); err != nil {
-		return nil, err
-	}
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		return nil, err
@@ -191,6 +188,12 @@ func StartGuard(ctx context.Context, root string, c *Client) (*Guard, error) {
 	if _, err = io.ReadFull(ready, signal[:]); err != nil || signal[0] != 1 {
 		writer.Close()
 		return nil, errors.New("SFU watchdog unavailable")
+	}
+	// Arm the independent reaper before startup recovery. If recovery times
+	// out, it still retries after this controller exits without opening admission.
+	if err = o.recover(ctx); err != nil {
+		writer.Close()
+		return nil, err
 	}
 	ok = true
 	return g, nil

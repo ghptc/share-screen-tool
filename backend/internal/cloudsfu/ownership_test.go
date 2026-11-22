@@ -279,4 +279,34 @@ func checkControllerCrash(t *testing.T, role string) {
 		t.Fatal("media continued after watchdog revocation")
 	}
 	t.Logf("SIGKILL to confirmed provider closure %s, %d packets received, zero subsequent packets for 1.2s while sender continued", elapsed.Round(time.Millisecond), n)
+	// Model a durable record whose provider response was lost before host
+	// shutdown. Even a timed-out replacement must leave an independent reaper.
+	app := os.Getenv("CLOUDFLARE_SFU_APP_ID")
+	var storage *OwnedMedia
+	wait(func() bool { storage, err = openOwner(dir, app, c); return err == nil })
+	direction := "local"
+	if role == "subscriber" {
+		direction = "remote"
+	}
+	if err = storage.record(owned.ID, ownership{owned.Mid, "generated", direction}); err != nil {
+		t.Fatal(err)
+	}
+	storage.directory.Close()
+	expired, expire := context.WithCancel(t.Context())
+	expire()
+	if g, e := StartGuard(expired, dir, c); e == nil {
+		g.Stop()
+		t.Fatal("timed-out startup admitted media")
+	}
+	wait(func() bool { _, e := os.Stat(filepath.Join(dir, app, owned.ID+".track")); return os.IsNotExist(e) })
+	// A later controller can now acquire exclusive ownership and serve.
+	var replacement *Guard
+	wait(func() bool { replacement, err = StartGuard(ctx, dir, c); return err == nil })
+	replacement.Stop()
+	select {
+	case <-replacement.Done:
+	case <-ctx.Done():
+		t.Fatal("replacement watchdog did not exit")
+	}
+	t.Log("timed-out startup denied admission, independent cleanup completed, replacement acquired ownership")
 }
