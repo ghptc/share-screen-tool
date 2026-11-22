@@ -3,7 +3,8 @@ import { readFileSync, writeFileSync } from 'node:fs'
 const args = process.argv.slice(2)
 const callbackOnly = args[0] === '--callback'
 const prepareOnly = args[0] === '--prepare'
-const [hostname, service, access] = callbackOnly || prepareOnly ? args.slice(1) : args
+const shellOnly = args[0] === '--access-setup'
+const [hostname, service, access] = callbackOnly || prepareOnly || shellOnly ? args.slice(1) : args
 const account = hostname?.replace(/\.workers\.dev$/, '')
 if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(account ?? '')) throw Error('Expected an account subdomain or its workers.dev hostname')
 const config = JSON.parse(readFileSync(new URL('wrangler.json', import.meta.url)))
@@ -14,8 +15,9 @@ if (callbackOnly) {
   console.log(callback)
   process.exit(0)
 }
-if (prepareOnly) {
-  if (args.length !== 2) throw Error('Usage: node configure.mjs --prepare ACCOUNT_SUBDOMAIN')
+if (prepareOnly || shellOnly) {
+  if (args.length !== 2) throw Error('Expected exactly one account subdomain')
+  config.workers_dev = shellOnly
 } else {
   if (!/^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(service ?? '') ||
       (access !== undefined && !['--access-setup', '--private-pilot'].includes(access)) || args.length > 3) {
@@ -24,5 +26,5 @@ if (prepareOnly) {
   if (access !== '--access-setup') config.vpc_services = [{ binding: 'CONTROLLER', service_id: service }]
   config.workers_dev = access !== undefined
 }
-writeFileSync(new URL('wrangler.private.json', import.meta.url), JSON.stringify(config, null, 2) + '\n')
+writeFileSync(new URL('wrangler.screen-share.json', import.meta.url), JSON.stringify(config, null, 2) + '\n')
 console.log('OAuth callback: ' + callback)

@@ -21,7 +21,7 @@ func TestOAuthTransaction(t *testing.T) {
 		case "/token":
 			id, secret, _ := r.BasicAuth()
 			h := sha256.Sum256([]byte(r.FormValue("code_verifier")))
-			if id != "client" || secret != "private" || base64.RawURLEncoding.EncodeToString(h[:]) != challenge || r.FormValue("redirect_uri") != "https://player.test/api/discord/callback" {
+			if id != "client" || secret != "private" || base64.RawURLEncoding.EncodeToString(h[:]) != challenge || r.FormValue("redirect_uri") != "https://screen-share-player.gabrielhpittacosta.workers.dev/api/discord/callback" {
 				http.Error(w, "Invalid", 403)
 				return
 			}
@@ -35,13 +35,16 @@ func TestOAuthTransaction(t *testing.T) {
 		}
 	}))
 	defer provider.Close()
-	o := NewOAuth(OAuthConfig{"https://player.test", "client", "private", provider.URL, provider.URL + "/token", provider.URL + "/user"}, d)
+	o := NewOAuth(OAuthConfig{"https://screen-share-player.gabrielhpittacosta.workers.dev", "client", "private", provider.URL, provider.URL + "/token", provider.URL + "/user"}, d)
 	mux := http.NewServeMux()
 	o.Register(mux)
 	for _, valid := range []bool{false, true} {
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, httptest.NewRequest("GET", "/discord/auth/"+ref, nil))
 		loc, _ := url.Parse(rec.Header().Get("Location"))
+		if loc.Query().Get("redirect_uri") != "https://screen-share-player.gabrielhpittacosta.workers.dev/api/discord/callback" {
+			t.Fatal("wrong hosted redirect URI")
+		}
 		state := loc.Query().Get("state")
 		challenge = loc.Query().Get("code_challenge")
 		if !valid {

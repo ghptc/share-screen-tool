@@ -1,0 +1,17 @@
+[Unit]
+Description=Screen Share private Discord voice authority
+Conflicts=whiterun-pilot-bot.service
+After=network-online.target whiterun-pilot-bot.service
+
+[Service]
+Environment=SCREEN_SHARE_ENV=production DISCORD_MODE=discord DISCORD_VOICE_ADDR=127.0.0.1:18491
+EnvironmentFile=%h/.config/whiterun-pilot/bot.env
+EnvironmentFile=%h/.config/screen-share/player.env
+ExecStart=%h/.local/lib/screen-share/screen-share-bot
+NoNewPrivileges=yes
+UMask=0077
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=default.target

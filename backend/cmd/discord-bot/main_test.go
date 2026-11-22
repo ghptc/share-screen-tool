@@ -28,20 +28,20 @@ func TestLiveCommandUsesInvokersVoiceAndRejectsOutsideGuild(t *testing.T) {
 		return discord.Presence{Channel: "22", Epoch: "current"}, present
 	}
 	ref, _ := dir.Reference(discord.Channel{Guild: "11", Voice: "22"})
-	reply := liveCommand(event.Interaction, dir, "https://player.test", lookup)
-	if reply == nil || reply.Data.Content != "Watch or share: https://player.test/r/"+ref || reply.Data.Flags != 0 {
+	reply := liveCommand(event.Interaction, dir, "https://screen-share-player.gabrielhpittacosta.workers.dev", lookup)
+	if reply == nil || reply.Data.Content != "Watch or share: https://screen-share-player.gabrielhpittacosta.workers.dev/r/"+ref || reply.Data.Flags != 0 {
 		t.Fatal("missing public room reference")
 	}
 	present = false
 	for _, guild := range []string{"11", ""} {
 		event.GuildID = guild
-		reply := liveCommand(event.Interaction, dir, "https://player.test", lookup)
+		reply := liveCommand(event.Interaction, dir, "https://screen-share-player.gabrielhpittacosta.workers.dev", lookup)
 		if reply == nil || reply.Data.Flags != dg.MessageFlagsEphemeral || strings.Contains(reply.Data.Content, "/r/") {
 			t.Fatal("channel information disclosed on denial")
 		}
 	}
 	event.Data = dg.ApplicationCommandInteractionData{Name: "other"}
-	if liveCommand(event.Interaction, dir, "https://player.test", lookup) != nil {
+	if liveCommand(event.Interaction, dir, "https://screen-share-player.gabrielhpittacosta.workers.dev", lookup) != nil {
 		t.Fatal("handled a different command")
 	}
 }
