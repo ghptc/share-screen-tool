@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+coverage/
+backend/bin/
+*.log
+test-results/
+playwright-report/

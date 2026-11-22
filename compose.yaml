@@ -1,0 +1,57 @@
+name: whiterun-live
+services:
+  livekit:
+    image: livekit/livekit-server:v1.13.11
+    command: ["--dev", "--config", "/etc/livekit.yaml", "--bind", "0.0.0.0"]
+    volumes:
+      - ./infrastructure/livekit/livekit.yaml:/etc/livekit.yaml:ro
+    ports:
+      - "127.0.0.1:7880:7880/tcp"
+      - "127.0.0.1:7881:7881/tcp"
+      - "127.0.0.1:7882:7882/udp"
+    security_opt: ["no-new-privileges:true"]
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      BACKEND_ADDR: "0.0.0.0:8080"
+      LIVEKIT_HTTP_URL: "http://livekit:7880"
+      LIVEKIT_API_KEY: "devkey"
+      LIVEKIT_API_SECRET: "secret"
+      LOCAL_ADMIN_KEY: "${LOCAL_ADMIN_KEY:?Set LOCAL_ADMIN_KEY in .env to a random key of at least 32 characters}"
+      LIVEKIT_WS_URL: "ws://127.0.0.1:7880"
+      APP_ORIGIN: "${APP_ORIGIN:-http://localhost:5173}"
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8080}:8080"
+    depends_on:
+      livekit:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "/server", "healthcheck", "http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      API_PROXY_TARGET: "http://backend:8080"
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-5173}:5173"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5173/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
