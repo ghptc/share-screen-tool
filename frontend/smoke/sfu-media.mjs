@@ -1,73 +1,96 @@
-// Run by TestTwoBrowserMedia. Only aggregate measurements go to stdout.
+// TestTwoBrowserMedia starts a TLS loopback origin and passes short-lived app
+// sessions over stdin. Only aggregate playback measurements go to stdout.
 import { chromium, firefox } from 'playwright'
 import { readFileSync } from 'node:fs'
-const {origin, keys, hosted} = JSON.parse(readFileSync(0, 'utf8'))
+
+const {origin, ref, cookies, hosted} = JSON.parse(readFileSync(0, 'utf8'))
 const engine = process.env.E2E_BROWSER === 'firefox' ? firefox : chromium
 let browser
 let stage = 'launch'
+
+async function measure(page, i) {
+  const deadline = Date.now() + 16000
+  while (Date.now() < deadline) {
+    const result = await page.evaluate(async i => {
+      const video = document.querySelector('[aria-label="Remote screen"] video')
+      if (video?.videoWidth !== 320 || video.videoHeight !== 180) return
+      const pc = window.testPeers.find(p => p.connectionState === 'connected' && p.getTransceivers().some(t => t.currentDirection === 'recvonly'))
+      if (!pc) return
+      const v = Array.from((await pc.getStats()).values()).find(s => s.type === 'inbound-rtp' && s.kind === 'video')
+      if (!(v?.framesDecoded >= 12) || !v.bytesReceived) return
+      const probe = document.createElement('canvas').getContext('2d')
+      probe.drawImage(video,0,0,1,1)
+      const [r,,b] = probe.getImageData(0,0,1,1).data
+      if (i ? r-b < 100 : b-r < 100) return
+      return {frames:v.framesDecoded, bytes:v.bytesReceived, width:video.videoWidth, height:video.videoHeight}
+    }, i)
+    if (result) return result
+    await new Promise(resolve => setTimeout(resolve,100))
+  }
+  throw Error('Remote playback timed out')
+}
+
 try {
   browser = await engine.launch({headless:true, chromiumSandbox:true})
-  const pages = await Promise.all(keys.map(async value => {
-    const ctx = await browser.newContext()
-    await ctx.addCookies([{name:'test-peer', value, url:origin, httpOnly:true, sameSite:'Strict'}])
+  const pages = await Promise.all(cookies.map(async (value, i) => {
+    const ctx = await browser.newContext({ignoreHTTPSErrors:true})
+    await ctx.addCookies([{name:'__Host-wl-session', value, url:origin, secure:true, httpOnly:true, sameSite:'Strict'}])
+    await ctx.addInitScript(({i, hosted}) => {
+      window.captureCount = 0
+      window.testPeers = []
+      const Peer = window.RTCPeerConnection
+      window.RTCPeerConnection = class extends Peer {
+        constructor(config) {
+          super(hosted ? config : {iceServers:[]})
+          window.testPeers.push(this)
+        }
+        addTransceiver(track, options) {
+          const t = super.addTransceiver(track, {...options, sendEncodings:[{maxBitrate:160000, maxFramerate:10}]})
+          t.setCodecPreferences(RTCRtpSender.getCapabilities('video').codecs.filter(c => c.mimeType.toLowerCase() === 'video/vp8'))
+          return t
+        }
+      }
+      navigator.mediaDevices.getDisplayMedia = async constraints => {
+        if (constraints.audio !== false || constraints.video.frameRate.ideal !== 60) throw Error('Unexpected capture constraints')
+        window.captureCount++
+        const canvas = document.createElement('canvas')
+        canvas.width=320
+        canvas.height=180
+        const ctx=canvas.getContext('2d')
+        let frame=0
+        const paint=()=>{
+          ctx.fillStyle=i?'#2020ec':'#ec2020'
+          ctx.fillRect(0,0,320,180)
+          ctx.fillStyle='white'
+          ctx.fillRect(frame++ % 200,10,8,8)
+        }
+        paint()
+        setInterval(paint,100)
+        window.testCapture=canvas.captureStream(10)
+        return window.testCapture
+      }
+    },{i,hosted})
     const page = await ctx.newPage()
-    await page.goto(origin)
+    await page.goto(origin+'/r/'+ref)
+    await page.getByRole('button',{name:'Start sharing'}).waitFor({timeout:10000})
+    if (await page.evaluate(()=>window.captureCount !== 0)) throw Error('Capture before consent')
     return page
   }))
-  stage = 'publish'
-  await Promise.all(pages.map((page,i) => page.evaluate(async ({i,hosted}) => {
-    const {publish,subscribe} = await import('/peer.js')
-    const config = {iceServers:hosted ? [{urls:'stun:stun.cloudflare.com:3478'}] : []}
-    const pc = new RTCPeerConnection(config)
-    const canvas = document.createElement('canvas')
-    canvas.width=320; canvas.height=180
-    const ctx=canvas.getContext('2d')
-    let frame=0
-    const paint=()=>{ctx.fillStyle=i?'#2020ec':'#ec2020'; ctx.fillRect(0,0,320,180); ctx.fillStyle='white';ctx.fillRect(frame++ % 200,10,8,8)}
-    paint();setInterval(paint,100)
-    const send=async(op,data)=>{
-      const r=await fetch('/signal/'+op,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
-      if(!r.ok) throw Error('signaling failed')
-      return r.json()
-    }
-    const stream=canvas.captureStream(10)
-    const tx=pc.addTransceiver.bind(pc)
-    // Force VP8 so the local packet forwarder never transcodes either direction.
-    pc.addTransceiver=(...args)=>{const t=tx(...args);t.setCodecPreferences(RTCRtpSender.getCapabilities('video').codecs.filter(c=>c.mimeType.toLowerCase()==='video/vp8'));return t}
-    await publish(pc,stream.getVideoTracks()[0],send,{maxBitrate:160000,maxFramerate:10})
-    window.pub=pc
-    window.receive=async()=>{
-      const rx=new RTCPeerConnection(config),video=document.createElement('video')
-      video.muted=true;video.autoplay=true;video.playsInline=true;document.body.append(video)
-      window.rx=rx
-      await subscribe(rx,'other',video,send)
-      await video.play()
-    }
-  },{i,hosted})))
-  await Promise.all(pages.map(page=>page.waitForFunction(()=>window.pub.connectionState==='connected',null,{timeout:12000})))
-  stage = 'subscribe'
-  await Promise.all(pages.map(page=>page.evaluate(()=>window.receive())))
-  stage = 'remote playback'
-  const results=await Promise.all(pages.map(async(page,i)=>{
-    const deadline=Date.now()+14000
-    while(Date.now()<deadline){
-      const measure=await page.evaluate(async i=>{
-      const stats=Array.from((await window.rx.getStats()).values())
-      const v=stats.find(s=>s.type==='inbound-rtp'&&s.kind==='video')
-      const video=document.querySelector('video')
-      if(!v || !(v.framesDecoded>=12) || !v.bytesReceived || video.videoWidth!==320) return false
-      const probe=document.createElement('canvas').getContext('2d')
-      probe.drawImage(video,0,0,1,1)
-      const [r,,b]=probe.getImageData(0,0,1,1).data
-      if(i ? r-b<100 : b-r<100) return false
-      return {frames:v.framesDecoded,bytes:v.bytesReceived,width:video.videoWidth,height:video.videoHeight}
-      },i)
-      if(measure) return measure
-      await new Promise(resolve=>setTimeout(resolve,100))
-    }
-    throw Error("No decoded remote video")
-  }))
-  console.log(JSON.stringify({browser:engine.name(),received:results}))
+  stage='publish'
+  await Promise.all(pages.map(p=>p.getByRole('button',{name:'Start sharing'}).click()))
+  stage='remote playback'
+  const results=await Promise.all(pages.map(measure))
+  stage='stop'
+  await pages[1].getByRole('button',{name:'Stop sharing'}).click()
+  await pages[0].getByRole('article',{name:'Remote screen'}).waitFor({state:'detached',timeout:10000})
+  if(await pages[1].evaluate(()=>window.testCapture.getTracks().some(t=>t.readyState!=='ended'))) throw Error('Capture remained live')
+  stage='voice departure'
+  // The Go driver delivers the event over the fixture's private voice authority.
+  console.log('switch-publisher-channel')
+  await pages[0].getByRole('heading',{name:'Player unavailable'}).waitFor({timeout:12000})
+  await pages[1].getByRole('heading',{name:'No active screens'}).waitFor({timeout:10000})
+  if(await pages[0].evaluate(()=>window.testCapture.getTracks().some(t=>t.readyState!=='ended'))) throw Error('Revoked capture remained live')
+  console.log(JSON.stringify({browser:engine.name(),received:results,explicitStop:true,voiceDeparture:true}))
 } catch {
   console.log('Failure during '+stage)
   process.exitCode=1

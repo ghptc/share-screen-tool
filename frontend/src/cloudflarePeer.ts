@@ -1,12 +1,14 @@
 // The application exchanges only Whiterun handles and WebRTC descriptions.
-export async function localSDP(pc, description) {
+export type Signal = (op: string, request: Record<string, unknown>) => Promise<{handle: string; sdp: string}>
+
+async function localSDP(pc: RTCPeerConnection, description: RTCSessionDescriptionInit) {
   await pc.setLocalDescription(description)
   if (pc.iceGatheringState !== 'complete') {
-    await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       const finish = () => {
         if (pc.iceGatheringState === 'complete') done()
       }
-      const done = (error) => {
+      const done = (error?: Error) => {
         clearTimeout(timer)
         pc.removeEventListener('icegatheringstatechange', finish)
         error ? reject(error) : resolve()
@@ -16,17 +18,17 @@ export async function localSDP(pc, description) {
       finish()
     })
   }
-  return pc.localDescription.sdp
+  return pc.localDescription!.sdp
 }
-export async function publish(pc, track, send, encoding) {
+export async function publish(pc: RTCPeerConnection, track: MediaStreamTrack, send: Signal, encoding?: RTCRtpEncodingParameters) {
   const tx = pc.addTransceiver(track, {direction: 'sendonly', ...(encoding && {sendEncodings:[encoding]})})
   const sdp = await localSDP(pc, await pc.createOffer())
   const result = await send('publish', {mid: tx.mid, sdp})
   await pc.setRemoteDescription({type: 'answer', sdp: result.sdp})
   return result.handle
 }
-export async function subscribe(pc, publication, element, send) {
-  pc.ontrack = ({track}) => { element.srcObject = new MediaStream([track]) }
+export async function subscribe(pc: RTCPeerConnection, publication: string, onTrack: (track: MediaStreamTrack) => void, send: Signal) {
+  pc.ontrack = ({track}) => onTrack(track)
   const result = await send('subscribe', {publication})
   await pc.setRemoteDescription({type: 'offer', sdp: result.sdp})
   const sdp = await localSDP(pc, await pc.createAnswer())

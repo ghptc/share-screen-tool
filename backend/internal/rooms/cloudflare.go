@@ -231,8 +231,12 @@ func (a *API) cfSignal(w http.ResponseWriter, r *http.Request) {
 	case "state":
 		g.mu.Lock()
 		list := []string{}
+		owned := []string{}
 		for _, t := range g.tracks {
 			if t.room == b.ref && !t.closing {
+				if t.owner == id {
+					owned = append(owned, t.handle)
+				}
 				if t.owner == id && (t.ready || t.answered) && slices.Contains(in.Handles, t.handle) {
 					t.seen = a.now()
 				}
@@ -242,7 +246,7 @@ func (a *API) cfSignal(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		g.mu.Unlock()
-		write(w, 200, map[string]any{"publications": list})
+		write(w, 200, map[string]any{"publications": list, "owned": owned})
 		return
 	case "answer", "ready", "close":
 	default:

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { ConnectionState, Room, RoomEvent } from 'livekit-client'
+import CloudflareStage from './CloudflareStage'
 import InvitationRooms from './InvitationRooms'
 import ScreenSharing from './ScreenSharing'
 import type { JoinResult } from './Rooms'
@@ -7,6 +8,7 @@ import './player.css'
 
 function Player({ channel }: {channel?: string}) {
   const [session, setSession] = useState<{ room: Room; credentials: JoinResult } | null>(null)
+  const [prototypePeer, setPrototypePeer] = useState('')
   const [state, setState] = useState('Connecting')
   const [error, setError] = useState('')
   const [attempt, setAttempt] = useState(0)
@@ -30,6 +32,7 @@ function Player({ channel }: {channel?: string}) {
         room = undefined
       }
       setSession(null)
+      setPrototypePeer('')
     }
     function retry() {
       disposeRoom()
@@ -61,8 +64,13 @@ function Player({ channel }: {channel?: string}) {
           return
         }
         if (!response.ok) throw new Error()
-        const credentials: JoinResult = await response.json()
+        const credentials: JoinResult & {transport?: string} = await response.json()
         if (controller.signal.aborted) return
+        if (channel && credentials.transport === 'cloudflare-prototype') {
+          setPrototypePeer(credentials.identity)
+          setState('Connected')
+          return
+        }
         const current = new Room({ adaptiveStream: false, dynacast: true })
         room = current
         current.on(RoomEvent.ConnectionStateChanged, connectionChanged)
@@ -105,7 +113,7 @@ function Player({ channel }: {channel?: string}) {
           {state}
         </span>
       </header>
-      {session ? (
+      {prototypePeer && channel ? <CloudflareStage key={prototypePeer} channel={channel} identity={prototypePeer} onDenied={() => { setPrototypePeer(''); setState('Unavailable'); setError('Connect to the associated Discord voice channel to watch.') }} /> : session ? (
         <ScreenSharing
           player
           channel={channel}

@@ -1,16 +1,20 @@
-package cloudsfu
+package rooms
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/json"
-	"errors"
+	"github.com/ghptc/whiterun-live/backend/internal/cloudsfu"
 	"io"
+	"log"
+	"path/filepath"
+
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
-	"slices"
+
 	"strings"
 	"sync"
 	"testing"
@@ -120,10 +124,10 @@ func TestTwoBrowserMedia(t *testing.T) {
 	if mode == "" {
 		t.Skip("set WHITERUN_SFU_MEDIA_TEST to loopback or cloudflare")
 	}
-	var media Media
+	var media cloudsfu.Media
 	switch mode {
 	case "cloudflare":
-		c, err := FromEnvironment()
+		c, err := cloudsfu.FromEnvironment()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -135,89 +139,34 @@ func TestTwoBrowserMedia(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
 	defer cancel()
-	type peer struct{ pub, recv, pmid, rmid string }
-	var mu sync.Mutex
-	var peers [2]peer
-	keys := []string{rand.Text(), rand.Text()}
+	mux := http.NewServeMux()
+	server := httptest.NewUnstartedServer(mux)
+	origin := "https://" + server.Listener.Addr().String()
+	fixture := newCFFixture(t, origin, media)
+	mux.Handle("/api/", http.StripPrefix("/api", fixture.api))
+	dist := "../../../frontend/dist"
+	if _, err := os.Stat(filepath.Join(dist, "index.html")); err != nil {
+		t.Fatal("build the frontend before running the browser test")
+	}
+	mux.Handle("GET /assets/", http.FileServer(http.Dir(dist)))
+	mux.HandleFunc("GET /r/{ref}", func(w http.ResponseWriter, r *http.Request) { http.ServeFile(w, r, filepath.Join(dist, "index.html")) })
+	server.Config.ErrorLog = log.New(io.Discard, "", 0) // Chromium probes the disposable test certificate before using the trusted test context.
+	server.StartTLS()
+	defer server.Close()
+	// Each cookie comes from a completed authorization-code exchange. No admission bypass.
+	cookies := []string{fixture.login(t, "33").Value, fixture.login(t, "34").Value}
+	monitorCtx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { defer close(done); fixture.a.ReconcileDiscord(monitorCtx) }()
 	defer func() {
-		c, stop := context.WithTimeout(context.Background(), 12*time.Second)
-		defer stop()
-		for _, p := range peers {
-			for _, track := range [][2]string{{p.recv, p.rmid}, {p.pub, p.pmid}} {
-				if track[0] != "" {
-					if err := media.Close(c, track[0], track[1]); err != nil {
-						t.Errorf("track closure failed: %v", err)
-					}
-				}
-			}
+		stop()
+		<-done
+		fixture.a.prototype.mu.Lock()
+		defer fixture.a.prototype.mu.Unlock()
+		if len(fixture.a.prototype.tracks) != 0 {
+			t.Error("provider closures remain pending")
 		}
 	}()
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		io.WriteString(w, "<!doctype html><body></body>")
-	})
-	mux.HandleFunc("GET /peer.js", func(w http.ResponseWriter, r *http.Request) { http.ServeFile(w, r, "peer.js") })
-	mux.HandleFunc("POST /signal/{op}", func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie("test-peer")
-		if err != nil || r.Header.Get("Origin") != "http://"+r.Host {
-			http.Error(w, "denied", 403)
-			return
-		}
-		i := slices.Index(keys, cookie.Value)
-		if i < 0 {
-			http.Error(w, "denied", 403)
-			return
-		}
-		var in struct{ Mid, Sdp string }
-		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 96<<10)).Decode(&in) != nil {
-			http.Error(w, "input", 400)
-			return
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		p := &peers[i]
-		other := &peers[1-i]
-		var sdp string
-		switch r.PathValue("op") {
-		case "publish":
-			if p.pub != "" {
-				err = errors.New("duplicate")
-				break
-			}
-			p.pub, err = media.NewSession(ctx)
-			p.pmid = in.Mid
-			if err == nil {
-				sdp, err = media.Publish(ctx, p.pub, "screen", in.Mid, in.Sdp)
-			}
-		case "subscribe":
-			if p.recv != "" || other.pub == "" {
-				err = errors.New("publication unavailable")
-				break
-			}
-			p.recv, err = media.NewSession(ctx)
-			if err == nil {
-				p.rmid, sdp, err = media.Subscribe(ctx, p.recv, other.pub, "screen")
-			}
-		case "answer":
-			if p.recv == "" {
-				err = errors.New("subscription unavailable")
-				break
-			}
-			err = media.Answer(ctx, p.recv, in.Sdp)
-		default:
-			http.NotFound(w, r)
-			return
-		}
-		if err != nil {
-			t.Errorf("%s failed (%T): %s", r.PathValue("op"), err, safeError(err))
-			http.Error(w, "signaling failed", 502)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"sdp": sdp, "handle": "track"})
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
 	cmd := exec.CommandContext(ctx, "node", "../../../frontend/smoke/sfu-media.mjs")
 	// Browser and JS runner inherit no application or provider credentials.
 	for _, name := range []string{"HOME", "PATH", "LANG", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY", "PLAYWRIGHT_BROWSERS_PATH", "E2E_BROWSER"} {
@@ -225,18 +174,29 @@ func TestTwoBrowserMedia(t *testing.T) {
 			cmd.Env = append(cmd.Env, name+"="+v)
 		}
 	}
-	data, _ := json.Marshal(map[string]any{"origin": server.URL, "keys": keys, "hosted": mode == "cloudflare"})
+	data, _ := json.Marshal(map[string]any{"origin": server.URL, "cookies": cookies, "ref": fixture.ref, "hosted": mode == "cloudflare"})
 	cmd.Stdin = strings.NewReader(string(data))
-	output, err := cmd.Output()
+	stream, err := cmd.StdoutPipe()
 	if err != nil {
-		t.Fatalf("browser media test failed: %s", output)
+		t.Fatal("browser output unavailable")
 	}
-	t.Logf("%s %s", mode, output)
-}
-func safeError(err error) string {
-	var status apiStatus
-	if errors.As(err, &status) {
-		return status.Error()
+	if err = cmd.Start(); err != nil {
+		t.Fatal("browser runner unavailable")
 	}
-	return "negotiation or connectivity failure"
+	scanner := bufio.NewScanner(stream)
+	switched := false
+	var report string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "switch-publisher-channel" {
+			fixture.voice(t, "33", "23")
+			switched = true
+		} else {
+			report = line
+		}
+	}
+	if err = cmd.Wait(); err != nil || !switched {
+		t.Fatalf("browser media test failed: %s", report)
+	}
+	t.Logf("%s %s", mode, report)
 }
