@@ -2,12 +2,14 @@ package rooms
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"regexp"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -24,20 +26,31 @@ type cfTrack struct {
 	screen, helper                         string // parent screen and native lease for an audio publication
 	audio                                  bool
 	session, mid                           string // guarded by operation
-	seen                                   time.Time
+	until, seen                            time.Time
 	ready, closing, answered               bool // guarded by registry mutex
 }
 type cfRegistry struct {
-	mu     sync.Mutex
-	tracks map[string]*cfTrack
-	media  cloudsfu.Media
+	controlKey string
+	mu         sync.Mutex
+	tracks     map[string]*cfTrack
+	change     chan struct{}
+	waiting    map[string]bool
+	media      cloudsfu.Media
 }
 
 func (a *API) EnableCloudflarePrototype(media cloudsfu.Media) {
-	a.prototype = &cfRegistry{tracks: map[string]*cfTrack{}, media: media}
+	a.prototype = &cfRegistry{controlKey: randomID(32), tracks: map[string]*cfTrack{}, change: make(chan struct{}), waiting: map[string]bool{}, media: media}
+}
+
+// Reproduce the original join response on a retry without storing the bearer.
+func (g *cfRegistry) controlFor(peer string) string {
+	mac := hmac.New(sha256.New, []byte(g.controlKey))
+	mac.Write([]byte(peer))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 type cfInput struct {
+	Version     string   `json:"version,omitempty"`
 	Handles     []string `json:"handles,omitempty"`
 	Publication string   `json:"publication"`
 	Handle      string   `json:"handle"`
@@ -90,14 +103,14 @@ func (a *API) cfOwner(r *http.Request) (roomAccess, string, int) {
 	if r.Header.Get("Origin") != d.c.Origin {
 		return roomAccess{}, "", 403
 	}
-	s, ok := d.oauth.Current(r)
-	if !ok {
-		return roomAccess{}, "", 401
-	}
 	id, ref := r.Header.Get("X-Whiterun-Peer"), r.PathValue("ref")
 	d.mu.Lock()
 	b, ok := d.active[id]
 	d.mu.Unlock()
+	s, authenticated := d.oauth.RoomEntry(r, b.entry)
+	if !authenticated {
+		return roomAccess{}, "", 401
+	}
 	if !ok || b.ref != ref || b.session != s.ID {
 		return roomAccess{}, "", 403
 	}
@@ -149,17 +162,21 @@ func (g *cfRegistry) reserve(b roomAccess, id, source string, now time.Time, hel
 	if helper == nil && source == "" && slots >= 4 {
 		return nil, 409
 	}
-	t := &cfTrack{handle: randomID(18), room: b.ref, owner: id, user: b.user, publication: source, seen: now}
+	t := &cfTrack{handle: randomID(18), room: b.ref, owner: id, user: b.user, publication: source, seen: now, until: b.until}
 	if helper != nil {
 		t.screen = helper.Screen
 		t.helper = helper.ID
 		t.audio = true
 	} else if source != "" {
 		t.audio = g.tracks[source].audio
+		if deadline := g.tracks[source].until; deadline.Before(t.until) {
+			t.until = deadline
+		}
 	}
 	// No other goroutine has a reference yet.
 	t.operation.Lock()
 	g.tracks[t.handle] = t
+	g.changedLocked()
 	return t, 200
 }
 func (g *cfRegistry) retireLocked(t *cfTrack) {
@@ -167,6 +184,7 @@ func (g *cfRegistry) retireLocked(t *cfTrack) {
 		return
 	}
 	t.closing = true
+	g.changedLocked()
 	if t.publication == "" {
 		for _, s := range g.tracks {
 			if s.publication == t.handle || s.screen == t.handle {
@@ -211,6 +229,7 @@ func (a *API) cfNew(w http.ResponseWriter, r *http.Request, b roomAccess, id str
 	// Complete an in-flight allocation even if the browser closes its HTTP request.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 16*time.Second)
 	defer cancel()
+	ctx = cloudsfu.WithAuthorizationExpiry(ctx, t.until)
 	var desc string
 	var err error
 	var publisherSession string
@@ -277,29 +296,7 @@ func (a *API) cfSignal(w http.ResponseWriter, r *http.Request) {
 		a.cfNew(w, r, b, id, in, op == "publish", nil)
 		return
 	case "state":
-		g.mu.Lock()
-		list := []string{}
-		audio := map[string]string{}
-		owned := []string{}
-		for _, t := range g.tracks {
-			if t.room == b.ref && !t.closing {
-				if t.owner == id {
-					owned = append(owned, t.handle)
-				}
-				if t.helper == "" && t.owner == id && (t.ready || t.answered) && slices.Contains(in.Handles, t.handle) {
-					t.seen = a.now()
-				}
-				if t.publication == "" && t.ready && t.user != b.user {
-					if t.audio {
-						audio[t.screen] = t.handle
-					} else {
-						list = append(list, t.handle)
-					}
-				}
-			}
-		}
-		g.mu.Unlock()
-		write(w, 200, map[string]any{"publications": list, "audio": audio, "owned": owned})
+		a.cfState(w, r, b, id, in)
 		return
 	case "answer", "ready", "close":
 	default:
@@ -335,6 +332,7 @@ func (a *API) cfSignal(w http.ResponseWriter, r *http.Request) {
 	}
 	if op == "ready" && t.publication == "" && !t.audio {
 		t.ready = true
+		g.changedLocked()
 		t.seen = a.now()
 		g.mu.Unlock()
 		write(w, 200, struct{}{})
@@ -374,7 +372,7 @@ func (a *API) sweepCloudflare(ctx context.Context, shutdown bool) {
 		a.discord.mu.Lock()
 		_, ok := a.discord.active[t.owner]
 		a.discord.mu.Unlock()
-		if shutdown || !ok || a.now().Sub(t.seen) > 20*time.Second {
+		if shutdown || !ok || (!t.until.IsZero() && !a.now().Before(t.until)) || a.now().Sub(t.seen) > 20*time.Second {
 			g.retireLocked(t)
 		}
 	}

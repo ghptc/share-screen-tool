@@ -122,6 +122,9 @@ func (f *cfFixture) post(t *testing.T, c *http.Cookie, id, ref, op string, in cf
 	r.Header.Set("Origin", f.cfg.Origin)
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("X-Whiterun-Peer", id)
+	if op == "join" {
+		r.Header.Set("X-Whiterun-Entry", id)
+	}
 	if c != nil {
 		r.AddCookie(c)
 	}
@@ -233,18 +236,19 @@ func TestCloudflarePublisherLimitAndCleanup(t *testing.T) {
 
 func TestCloudflareViewersHaveIndependentHeartbeatBudgets(t *testing.T) {
 	f := newCFFixture(t, "https://player.test", &fakeMedia{})
-	cookie := f.login(t, "33")
+	cookies := make([]*http.Cookie, 8)
 	ids := make([]string, 8)
 	for i := range ids {
-		code, body := f.post(t, cookie, "", f.ref, "join", cfInput{})
+		cookies[i] = f.login(t, "33")
+		code, body := f.post(t, cookies[i], strconv.Itoa(i), f.ref, "join", cfInput{})
 		if code != 200 {
 			t.Fatal(code)
 		}
 		ids[i] = body["identity"].(string)
 	}
 	for range 4 {
-		for _, id := range ids {
-			if code, _ := f.post(t, cookie, id, f.ref, "state", cfInput{}); code != 200 {
+		for i, id := range ids {
+			if code, _ := f.post(t, cookies[i], id, f.ref, "state", cfInput{}); code != 200 {
 				t.Fatalf("viewer heartbeat %d", code)
 			}
 		}
