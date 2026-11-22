@@ -498,3 +498,24 @@ test('Discord publication waits for the local LiveKit permission event after the
   expect(capture).toHaveBeenCalledTimes(1)
   expect(room.listeners.get(RoomEvent.ParticipantPermissionsChanged)?.size).toBe(0)
 })
+
+test('hosted player pairs through its own HTTPS API only after an active share and click', async () => {
+  vi.stubEnv('VITE_NATIVE_AUDIO_MODE', 'pair')
+  const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async path =>
+    String(path).endsWith('/watch')
+      ? new Response(new ReadableStream({start(c) { c.enqueue(new Uint8Array([1])) }}))
+      : Response.json({session: 'test-session', code: 'test-code'}))
+  try {
+    render(<ScreenSharing room={room as unknown as Room} canPublish player nativeAudioControl="control" />)
+    fireEvent.click(screen.getByRole('button', {name: 'Audio'}))
+    expect(screen.queryByRole('button', {name: 'Pair native audio helper'})).toBeNull()
+    await start()
+    expect(fetcher).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', {name: 'Pair native audio helper'}))
+    expect(await screen.findByLabelText('One-time native audio pairing JSON')).toHaveAttribute('type', 'password')
+    fireEvent.click(screen.getByRole('button', {name: 'Stop sharing'}))
+    await waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/native-audio/test-session/stop', expect.anything()))
+  } finally {
+    vi.unstubAllEnvs()
+  }
+})

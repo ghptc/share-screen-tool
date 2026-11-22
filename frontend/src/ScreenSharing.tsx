@@ -322,7 +322,7 @@ export default function ScreenSharing({ room, canPublish, nativeAudioControl, ch
   const screenSid = screens.find(screen => screen.local)?.publication.trackSid
   if (player) return <PlayerStage screens={screens} peers={audioPeers} connected={connected} sharing={sharing} busy={busy}
     screen={sharing ? screenSid : undefined} control={nativeAudioControl} canPublish={canPublish} error={error}
-    quality={quality} nativeSettings={settings ?? undefined} qualityBusy={qualityBusy || !!busy}
+    quality={quality} nativeSettings={settings ?? undefined} nativeAudioStatus={nativeStatus} qualityBusy={qualityBusy || !!busy}
     changeQuality={target => void changeQuality(target)} start={() => void start()} stop={() => void stop()} />
   return <div className="screen-sharing">
     <h3>Screens</h3>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties } from 're
 import type { TrackPublication } from 'livekit-client'
 import { ScreenTile, type Screen } from './ScreenTile'
 import DesktopAudio from './DesktopAudio'
+import NativeAudio from './NativeAudio'
 import { readAudioPreference, writeAudioPreference } from './gameAudioSession'
 import MediaDiagnostics from './MediaDiagnostics'
 import { resolutions, type VideoTarget } from './videoQuality'
@@ -44,6 +45,7 @@ type Props = {
   error: string
   quality: VideoTarget
   nativeSettings?: MediaTrackSettings
+  nativeAudioStatus?: string
   qualityBusy: boolean
   changeQuality: (target: VideoTarget) => void
   start: () => void
@@ -58,7 +60,7 @@ export default function PlayerStage({
   screen,
   control,
   canPublish,
-  quality, nativeSettings, qualityBusy, changeQuality,
+  quality, nativeSettings, nativeAudioStatus, qualityBusy, changeQuality,
   error,
   start,
   stop,
@@ -267,7 +269,11 @@ export default function PlayerStage({
           ref={panel}
         >
           {menu && audioToggle}
-          {control && (
+          {control && (import.meta.env.VITE_NATIVE_AUDIO_MODE === 'pair' ? (
+            audioEnabled && connected && sharing && screen && (
+              <NativeAudio key={screen} control={control} screen={screen} status={nativeAudioStatus} />
+            )
+          ) : (
             <DesktopAudio
               key={sharing ? 'share' : 'idle'}
               open={menu}
@@ -276,7 +282,7 @@ export default function PlayerStage({
               onStatus={reportAudio}
               onOffer={setOffer}
             />
-          )}
+          ))}
           {peers.map((p) => (
             <RemoteScreenAudio
               player

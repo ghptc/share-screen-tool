@@ -65,6 +65,14 @@ export default function NativeAudio({ control, screen, status }: { control?: str
     try { await request(`${session}/stop`, {}); setSession(''); setPair('') }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not stop native audio') }
   }
+  async function copyPairingCode() {
+    try {
+      await navigator.clipboard.writeText(pair)
+      setError('')
+    } catch {
+      setError('Allow clipboard access to copy the pairing code.')
+    }
+  }
   if (!control) return null
   return <section aria-label="Native system audio">
     <h4>Native system audio (Linux)</h4>
@@ -74,7 +82,8 @@ export default function NativeAudio({ control, screen, status }: { control?: str
     {pending && <p role="status">Creating native audio pairing…</p>}
     {session && <>
       {watchReady ? <>
-        <label>One-time native audio pairing JSON<input readOnly value={pair} /></label>
+        <label>One-time native audio pairing JSON<input type="password" autoComplete="off" readOnly value={pair} /></label>
+        <button onClick={() => void copyPairingCode()}>Copy pairing code</button>
         <p>Run <code>whiterun-audio --list-applications</code>, then <code>whiterun-audio --start --application SERIAL</code> with your game's number. Paste this single-use code into the helper within one minute.</p>
       </> : <p role="status">Connecting to the native audio session…</p>}
       <button onClick={() => void stop()}>Stop native audio session</button>

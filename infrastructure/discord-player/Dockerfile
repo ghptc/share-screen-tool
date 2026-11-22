@@ -3,7 +3,7 @@ WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
-RUN npm run build
+RUN VITE_NATIVE_AUDIO_MODE=pair npm run build
 
 FROM caddy:2-alpine
 COPY --from=build /app/dist /srv
