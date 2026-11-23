@@ -1,0 +1,10 @@
+[Unit]
+Description=Screen Share desktop audio launcher for the hosted player
+
+[Service]
+ExecStart=%h/.local/lib/screen-share/hosted-audio --desktop-launcher --player-origin https://screen-share-player.gabrielhpittacosta.workers.dev
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

@@ -15,7 +15,7 @@ export async function audioPost(path: string, data: unknown, signal: AbortSignal
 }
 
 // Owner-watch text lines may be split or coalesced by the HTTP proxy.
-export function audioPhaseReader(report: (text: string) => void) {
+export function audioPhaseReader(report: (text: string) => void, reportSharing = true) {
   const decoder = new TextDecoder()
   let pending = ''
   return (chunk: Uint8Array) => {
@@ -24,8 +24,9 @@ export function audioPhaseReader(report: (text: string) => void) {
     for (const line of lines) {
       if (line === 'waiting') report('Waiting for the selected application to send audio (30-second startup limit).')
       if (line === 'ready') report('Stereo links ready. Waiting for audio.')
-      if (line === 'sharing') report('Sharing audio')
+      if (line === 'sharing' && reportSharing) report('Sharing audio')
     }
+    return lines.includes('active')
   }
 }
 
@@ -36,11 +37,14 @@ export async function publishGameAudio(
   signal: AbortSignal,
   ready: () => void,
   report?: (status: string) => void,
+  startHelper: (source: string, code: string, signal: AbortSignal) => Promise<unknown> = (source, code, signal) =>
+    audioPost('/player/start', { source: source.split(',')[0], additional: source.split(',').slice(1), code }, signal),
 ) {
   signal.throwIfAborted()
   const watch = new AbortController()
   const lifetime = AbortSignal.any([signal, watch.signal])
   let session: string | undefined
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
   let stopping: Promise<unknown> | undefined
   function revoke() {
     if (session && !stopping) {
@@ -62,36 +66,46 @@ export async function publishGameAudio(
     ).json()
     session = pair.session
     lifetime.throwIfAborted()
-    const response = await audioPost(`/api/native-audio/${session}/watch`, {}, lifetime, control)
-    const reader = response.body?.getReader()
-    if (!reader || (await reader.read()).done) throw new Error('Owner watch unavailable')
     let started = false
-    const readPhase = audioPhaseReader(text => { if (!started && !lifetime.aborted) report?.(text) })
-    const ended = (async () => {
+    // The launcher acknowledges the selected application on its start request.
+    const readPhase = audioPhaseReader(text => { if (!started && !lifetime.aborted) report?.(text) }, false)
+    // Only the handshake has a deadline. The same response stays open for the
+    // entire share, and its first heartbeat can span multiple network reads.
+    const handshake = setTimeout(() => watch.abort(), 10000)
+    try {
+      const response = await audioPost(`/api/native-audio/${session}/watch`, {}, lifetime, control)
+      if (!response.body) throw new Error('Owner watch unavailable')
+      reader = response.body.getReader()
+      for (;;) {
+        const chunk = await reader.read()
+        if (chunk.done) throw new Error('Owner watch ended')
+        if (readPhase(chunk.value)) break
+      }
+    } finally {
+      clearTimeout(handshake)
+    }
+    const ended = (async (ownerWatch: ReadableStreamDefaultReader<Uint8Array>) => {
       try {
         for (;;) {
-          const chunk = await reader.read()
+          const chunk = await ownerWatch.read()
           if (chunk.done) break
           readPhase(chunk.value)
         }
       } catch {
         /* network loss or deliberate stop */
       } finally {
-        reader.releaseLock()
         watch.abort()
       }
-    })()
-    await audioPost(
-      '/player/start',
-      { source: source.split(',')[0], additional: source.split(',').slice(1), code: pair.code },
-      AbortSignal.any([lifetime, AbortSignal.timeout(50000)]),
-    )
+    })(reader)
+    lifetime.throwIfAborted()
+    await startHelper(source, pair.code, AbortSignal.any([lifetime, AbortSignal.timeout(50000)]))
     lifetime.throwIfAborted()
     started = true
     ready()
     await ended
   } finally {
     watch.abort()
+    reader?.releaseLock()
     revoke()
     signal.removeEventListener('abort', revoke)
     await stopping

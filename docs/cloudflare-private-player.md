@@ -61,11 +61,83 @@ To use the outcome-only Firefox recorder for the deployed site, supply its priva
 
 ### Linux native application audio
 
-With **Share audio** enabled and the screen publication ready, the publisher can open **Audio → Pair native audio helper**. An explicit click creates a screen-bound session. The player reveals a single-use pairing code after its owner watch receives the first heartbeat. Use the installed Linux helper on the publishing workstation to list eligible applications and select the intended application's serial. Supply pairing JSON over standard input through a hidden prompt. Codes expire after one minute. The helper claims the code at the same HTTPS origin and renews a ten-second lease against the authorized Discord session and screen. Closing the Audio panel keeps the watch alive. Stopping the screen or disabling audio ends it.
+With an owned screen live and **Share audio** enabled, open **Audio**, select an application, then choose **Share application audio**. Opening the chooser reads PipeWire metadata. The share button creates the single-use claim, waits for the authenticated owner watch and delivers the claim to the workstation launcher. The browser may ask for loopback access and the workstation client certificate. **Pair manually** opens the existing terminal pairing flow. [Browser local network permissions](https://developer.chrome.com/blog/local-network-access)
 
-The helper requires neither browser cookies nor a Cloudflare Access credential. The workstation source and start endpoints remain private to the local player. Pairing and SFU readiness alone do not establish RTP delivery. Separate acceptance requires increasing sender and receiver audio packet counters for the same authorized publication with receiver playback disabled.
+The player shows **Connecting**, **Waiting** for an idle application, **Sharing audio** after the first accepted write, and **Stopped** when the audio session ends. Closing the panel keeps the session active. Stopping audio or the screen, closing the tab, and loss of Discord ownership end authorization through the existing watch and ten-second helper lease. The helper pins one application's PipeWire instance, serial and stereo links. Its idle startup budget is 30 seconds.
+
+The claim expires after one minute. The helper uses that claim and its lease without browser cookies or a Cloudflare Access credential. To verify RTP delivery separately, check for increasing sender and receiver packet counters on the same publication with receiver playback disabled.
+
+Viewers can open **Audio** to mute a remote publisher or adjust their local playback from 0 to 100%. Each publisher starts at 100%. The player remembers each choice for the room visit, including video focus changes, replaced publications and gaps in audio.
 
 The Worker incurs one dynamic request for a room page; matching JS and CSS are static asset requests. Idle room state waits up to 60 seconds and returns early on a change. A track-owning peer checks in at most 12 seconds apart under normal idle signaling to preserve the existing disconnect timeout. Per ten-hour visit, budget about **600** timed state requests without tracks or **3,000** with tracks, plus join, changes and other application traffic. Four continuously occupied tabs across successive visits imply 5,760 or 28,800 timed state requests/day respectively. The 100,000/day Free quota is shared with other dynamic requests. Failures back off to one attempt per minute. The Go monitor continues to reconcile locally. Workers and SFU egress have separate quotas. [Static asset billing](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/) · [Realtime pricing](https://developers.cloudflare.com/realtime/sfu/platform/pricing/)
+
+## Roll out the launcher and publisher volume
+
+Run these steps manually from the repository root on the indicated machines. To verify the change before rollout, run the frontend unit suite and the in-memory Go fixtures.
+
+```bash
+(cd frontend && npm test && npm run typecheck)
+(cd native-audio && go test . -run '^Test(HostedLauncher|IdleStartup|ApplicationLinkDiagnostics|BoundedRecorderStartup|StartupLeaseStopsWhileWaiting|StartupFirst)' -count=1)
+(cd backend && go test ./internal/rooms -run '^TestScreenPublisherKeySurvivesReplacement$' -count=1)
+```
+
+**1. Enroll each publishing workstation once.** The launcher uses TLS on `127.0.0.1:18495`. The browser verifies the launcher certificate and presents its own workstation-specific client certificate. The launcher accepts JSON POSTs from the exact configured HTTPS player origin. Generate a distinct pair of end-entity certificates per desktop user. These commands are for a first install in Bash with OpenSSL, NSS tools, Go, libopus development headers and the existing PipeWire tools.
+
+```bash
+set -euo pipefail
+umask 077
+certdir="${XDG_CONFIG_HOME:-$HOME/.config}/screen-share/launcher"
+install -d -m 700 "$(dirname "$certdir")" "$HOME/.local/lib/screen-share" "$HOME/.config/systemd/user"
+mkdir -m 700 "$certdir"  # Stop on an existing enrollment.
+(cd native-audio && go build -trimpath -o "$HOME/.local/lib/screen-share/hosted-audio" .)
+openssl req -x509 -newkey rsa:2048 -noenc -days 365 -subj '/CN=Screen Share launcher' \
+  -addext 'subjectAltName=IP:127.0.0.1' -addext 'basicConstraints=critical,CA:FALSE' \
+  -addext 'extendedKeyUsage=serverAuth' -keyout "$certdir/server-key.pem" -out "$certdir/server.pem"
+openssl req -x509 -newkey rsa:2048 -noenc -days 365 -subj '/CN=Screen Share browser' \
+  -addext 'basicConstraints=critical,CA:FALSE' -addext 'extendedKeyUsage=clientAuth' \
+  -addext 'keyUsage=critical,digitalSignature' -keyout "$certdir/browser-key.pem" -out "$certdir/browser.pem"
+openssl pkcs12 -export -name 'Screen Share browser' -in "$certdir/browser.pem" \
+  -inkey "$certdir/browser-key.pem" -out "$certdir/browser.p12"
+```
+
+Choose an export password at the prompt. Import into the publishing user's browser. For Chromium on Linux, use its existing NSS database as shown below. For Firefox, set `nssdb` to the intended profile's root directory shown in `about:profiles` and close that profile before the import. The `P,,` trust flag trusts the individual server certificate. Keep the client private key on the workstation. [Chromium Linux certificate management](https://chromium.googlesource.com/chromium/src/+/main/docs/linux/cert_management.md)
+
+The supplied unit authorizes the production Worker origin. For another deployment, set `--player-origin` in the installed unit to the exact HTTPS origin of that player before enabling the service.
+
+```bash
+nssdb="$HOME/.local/share/pki/nssdb"
+if [[ -f "$HOME/.pki/nssdb/cert9.db" ]]; then nssdb="$HOME/.pki/nssdb"; fi
+# For Firefox, set nssdb to the chosen profile here.
+test -f "$nssdb/cert9.db"
+certutil -d "sql:$nssdb" -A -t 'P,,' -n 'Screen Share launcher' -i "$certdir/server.pem"
+pk12util -d "sql:$nssdb" -i "$certdir/browser.p12"
+rm -- "$certdir/browser-key.pem" "$certdir/browser.p12"
+install -m 600 native-audio/screen-share-hosted-audio.service "$HOME/.config/systemd/user/"
+# For another player origin, edit the installed unit here.
+systemctl --user daemon-reload
+systemctl --user enable --now screen-share-hosted-audio.service
+systemctl --user is-active screen-share-hosted-audio.service
+```
+
+The daemon reads `server.pem`, `server-key.pem` and `browser.pem` from its user's configuration directory. Renew the certificates and repeat the browser import before expiry. Restart the launcher after replacing the files.
+
+**2. Update the origin controller.** The room state now includes a screen-to-publisher mapping using the existing public, room-scoped participant key. Schedule the switch between rooms because a controller restart ends in-memory admissions. On the origin host, stage the binary, save the running version and switch it atomically during the maintenance window.
+
+```bash
+set -euo pipefail
+bin="$HOME/.local/lib/screen-share/screen-share-controller"
+backup="$bin.before-audio-$(date +%s)"
+(cd backend && go build -trimpath -o "$bin.next" ./cmd/server)
+cp -p "$bin" "$backup"
+printf 'Controller rollback binary: %s\n' "$backup"
+mv -T "$bin.next" "$bin"
+systemctl --user restart screen-share-controller.service
+systemctl --user is-active screen-share-controller.service
+```
+
+**3. Promote the player** using the versioned Worker procedure below. Reopen the room to load its new assets. Older controllers support mixing by current screen handle until the controller update supplies stable publisher keys.
+
+**Rollback.** Restore the previous Worker version using the command below. To retire the new workstation listener, run `systemctl --user disable --now screen-share-hosted-audio.service`. Publishers can continue using manual pairing. To restore the controller during a maintenance window, use the saved path in `cp -p "$backup" "$bin.next" && mv -T "$bin.next" "$bin" && systemctl --user restart screen-share-controller.service`. Retain the existing ownership journal and watchdog.
 
 ## Player-only deployment and rollback
 

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties } from 're
 import type { TrackPublication } from 'livekit-client'
 import { ScreenTile, type Screen } from './ScreenTile'
 import DesktopAudio from './DesktopAudio'
-import NativeAudio from './NativeAudio'
+import HostedAudio from './HostedAudio'
 import { readAudioPreference, writeAudioPreference } from './gameAudioSession'
 import MediaDiagnostics from './MediaDiagnostics'
 import type { VideoTarget } from './videoQuality'
@@ -266,7 +266,7 @@ export default function PlayerStage({
           {menu && audioToggle}
           {control && (import.meta.env.VITE_NATIVE_AUDIO_MODE === 'pair' ? (
             audioEnabled && connected && sharing && screen && (
-              <NativeAudio key={screen} control={control} screen={screen} status={nativeAudioStatus} />
+              <HostedAudio key={screen} control={control} screen={screen} open={menu} status={nativeAudioStatus} />
             )
           ) : (
             <DesktopAudio

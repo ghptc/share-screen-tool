@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { audioPost, publishGameAudio, readAudioPreference, writeAudioPreference } from './gameAudioSession'
 
-type Source = { id: string; name: string; detail: string; idle?: boolean }
+export type Source = { id: string; name: string; detail: string; idle?: boolean }
 const previousSourceKey = 'whiterun.gameAudio.previousSource'
 const stoppedStatus = 'Application audio stopped. Select a source or start again.'
-const sourceLabel = (s: Source) => (s.detail && s.detail !== s.name ? s.name + ' · ' + s.detail : s.name)
+export const sourceLabel = (s: Source) => (s.detail && s.detail !== s.name ? s.name + ' · ' + s.detail : s.name)
 
 export default function DesktopAudio({
   open,

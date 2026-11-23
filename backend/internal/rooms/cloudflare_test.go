@@ -362,7 +362,7 @@ func TestCloudflareNativeOfferPermissions(t *testing.T) {
 	}
 	watch := openOwnerWatch(t, controller.URL+path+"/watch", control)
 	defer watch.Body.Close()
-	status, credentials := call(t, controller.URL, "/native-audio/claim", "", code)
+	status, credentials := call(t, controller.URL, "/native-audio/claim", "", map[string]any{"code": code["code"], "localOnly": true})
 	if status != 200 || credentials["transport"] != "cloudflare" || credentials["token"] != nil {
 		t.Fatal("valid claim did not return Cloudflare helper credentials")
 	}

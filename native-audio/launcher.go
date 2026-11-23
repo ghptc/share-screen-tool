@@ -20,9 +20,15 @@ import (
 	"time"
 )
 
-// systemd owns the mode-0600 Unix socket. Listing touches only graph metadata.
 func serveDesktop(origin, socket string) error {
+	binary, err := os.Executable()
+	if err != nil {
+		return err
+	}
 	u, err := url.Parse(origin)
+	if err == nil && u.Scheme == "https" && u.Hostname() != "" && origin == "https://"+u.Host && u.User == nil {
+		return serveHostedDesktop(origin, binary)
+	}
 	if err != nil || u.Scheme != "http" || u.Hostname() != "localhost" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("desktop player requires a localhost origin")
 	}
@@ -48,10 +54,10 @@ func serveDesktop(origin, socket string) error {
 	if listener.Addr().Network() != "unix" {
 		return errors.New("desktop launcher requires a Unix socket")
 	}
-	binary, err := os.Executable()
-	if err != nil {
-		return err
-	}
+	return desktopServer(origin, binary, false).Serve(listener)
+}
+
+func desktopServer(origin, binary string, hosted bool) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /sources", func(w http.ResponseWriter, r *http.Request) {
 		graph, err := readGraph(r.Context())
@@ -107,6 +113,10 @@ func serveDesktop(origin, socket string) error {
 			return
 		}
 		core, serialText, scoped := strings.Cut(req.Source, ":")
+		if hosted && (!scoped || len(req.Additional) != 0) {
+			http.Error(w, "Select one application on the current PipeWire instance", 400)
+			return
+		}
 		if !scoped {
 			serialText, core = req.Source, ""
 		} // Older manual player selections.
@@ -179,6 +189,5 @@ func serveDesktop(origin, socket string) error {
 			http.Error(w, "Audio start interrupted", 408)
 		}
 	})
-	server := http.Server{Handler: mux, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 48 * time.Second, IdleTimeout: 10 * time.Second}
-	return server.Serve(listener)
+	return &http.Server{Handler: mux, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 48 * time.Second, IdleTimeout: 10 * time.Second}
 }

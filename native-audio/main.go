@@ -154,9 +154,9 @@ func stopAfterGraphError(phase string, err error) error {
 }
 
 func run() (runErr error) {
-	launcher := flag.Bool("desktop-launcher", false, "Serve the private desktop activation socket")
-	playerOrigin := flag.String("player-origin", "http://localhost:5173", "Local player origin for the desktop launcher")
-	localCapture := flag.Bool("local-player-capture", false, "Accept only a local default-room capture claim")
+	launcher := flag.Bool("desktop-launcher", false, "Serve the local player's Unix socket or a hosted player's authenticated loopback listener")
+	playerOrigin := flag.String("player-origin", "http://localhost:5173", "Exact player origin authorized by the desktop launcher")
+	localCapture := flag.Bool("local-player-capture", false, "Accept only a default-room or Discord desktop launcher claim and acknowledge startup on stdout")
 	version := flag.Bool("version", false, "Print running executable identity without capture or pairing")
 	timingPath := flag.String("timing-json", "", "Optional new metadata-only JSONL timing log (never audio); explicit capture consent still required")
 	instance := flag.String("pipewire-instance", "", "Expected PipeWire core instance for a desktop selection")

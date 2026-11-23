@@ -23,6 +23,7 @@ import (
 type cfTrack struct {
 	operation                              sync.Mutex
 	handle, room, owner, user, publication string
+	publisherKey                           string // public room-scoped roster key for a screen
 	screen, helper                         string // parent screen and native lease for an audio publication
 	audio                                  bool
 	session, mid                           string // guarded by operation
@@ -180,6 +181,8 @@ func (g *cfRegistry) reserve(b roomAccess, id string, in cfInput, now time.Time,
 		if deadline := g.tracks[source].until; deadline.Before(t.until) {
 			t.until = deadline
 		}
+	} else {
+		t.publisherKey = b.participantKey
 	}
 	// No other goroutine has a reference yet.
 	t.operation.Lock()

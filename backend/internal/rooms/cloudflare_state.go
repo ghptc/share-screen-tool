@@ -26,6 +26,7 @@ type participant struct {
 type mediaState struct {
 	Participants []participant     `json:"participants"`
 	Publications []string          `json:"publications"`
+	Publishers   map[string]string `json:"publishers,omitempty"`
 	Audio        map[string]string `json:"audio"`
 	Owned        []string          `json:"owned"`
 	Version      string            `json:"version,omitempty"`
@@ -62,7 +63,7 @@ func (a *API) snapshot(b roomAccess, id string, handles []string, received time.
 		d.active[id] = requester
 	}
 	publishers := make(map[string]bool)
-	s := mediaState{Participants: []participant{}, Publications: []string{}, Audio: map[string]string{}, Owned: []string{}}
+	s := mediaState{Participants: []participant{}, Publications: []string{}, Publishers: map[string]string{}, Audio: map[string]string{}, Owned: []string{}}
 	for _, t := range g.tracks {
 		if t.room != b.ref || t.closing {
 			continue
@@ -81,6 +82,7 @@ func (a *API) snapshot(b roomAccess, id string, handles []string, received time.
 				s.Audio[t.screen] = t.handle
 			} else {
 				s.Publications = append(s.Publications, t.handle)
+				s.Publishers[t.handle] = t.publisherKey
 			}
 		}
 	}

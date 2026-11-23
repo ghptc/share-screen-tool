@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { publish, ScreenIceGatheringError, subscribe, type Signal } from './cloudflarePeer'
 import DesktopAudio from './DesktopAudio'
-import NativeAudio from './NativeAudio'
+import HostedAudio from './HostedAudio'
 import { readAudioPreference, writeAudioPreference } from './gameAudioSession'
 import { applyVideoTarget, nativeTarget, type VideoTarget } from './videoQuality'
 import PublishQuality from './PublishQuality'
@@ -18,6 +18,8 @@ type Flow = {
 }
 type Participant = { key: string; name: string; avatar?: string; sharing: boolean }
 type Tile = { key: string; stream: MediaStream; audioFor?: string }
+type Mix = { volume: number; muted: boolean }
+const defaultMix: Mix = { volume: 100, muted: false }
 const local = 'local'
 const localAudio = 'local-audio'
 
@@ -58,16 +60,22 @@ function RemoteAudio({
   stream,
   label,
   screen,
+  mix,
+  onMix,
   onBlocked,
 }: {
   stream?: MediaStream
   label: string
   screen: string
+  mix: Mix
+  onMix: (mix: Mix) => void
   onBlocked: (screen: string, blocked: boolean) => void
 }) {
   const element = useRef<HTMLAudioElement>(null)
-  const [volume, setVolume] = useState(1)
-  const [muted, setMuted] = useState(false)
+  const { volume, muted } = mix
+  useEffect(() => {
+    if (element.current) element.current.volume = volume / 100
+  }, [volume, stream])
   useEffect(() => {
     const audio = element.current
     if (!audio || !stream) return
@@ -75,7 +83,7 @@ function RemoteAudio({
     audio.srcObject = stream
     if (!audio.muted)
       void audio.play().catch(() => {
-        if (active) onBlocked(screen, true)
+        if (active && !audio.muted) onBlocked(screen, true)
       })
     return () => {
       active = false
@@ -84,17 +92,16 @@ function RemoteAudio({
       onBlocked(screen, false)
     }
   }, [stream, screen, onBlocked])
-  useEffect(() => {
-    if (element.current) element.current.volume = volume
-  }, [volume, stream])
   if (!stream) return null
   function toggle() {
     const audio = element.current
     if (!audio) return
     audio.muted = !muted
-    setMuted(!muted)
+    onMix({ volume, muted: !muted })
     if (audio.muted) onBlocked(screen, false)
-    else void audio.play().catch(() => onBlocked(screen, true))
+    else void audio.play().catch(() => {
+      if (element.current === audio && audio.srcObject === stream && !audio.muted) onBlocked(screen, true)
+    })
   }
   return (
     <div className="listener-mix">
@@ -105,15 +112,15 @@ function RemoteAudio({
         onPlaying={() => onBlocked(screen, false)}
       />
       <label>
-        {label}
+        {label} <small aria-hidden="true">{volume}%</small>
         <input
           type="range"
           aria-label={label + ' volume'}
           min="0"
-          max="1"
-          step="0.01"
+          max="100"
+          aria-valuetext={volume + '%'}
           value={volume}
-          onChange={(e) => setVolume(Number(e.target.value))}
+          onChange={(e) => onMix({ muted, volume: Number(e.target.value) })}
         />
       </label>
       <button aria-label={(muted ? 'Unmute ' : 'Mute ') + label} aria-pressed={muted} onClick={toggle}>
@@ -140,6 +147,8 @@ export default function CloudflareStage({
 }) {
   const [media, setMedia] = useState<Tile[]>([])
   const [participants, setParticipants] = useState<Participant[]>([])
+  const [publishers, setPublishers] = useState<Record<string, string>>({})
+  const [mixes, setMixes] = useState<Record<string, Mix>>({})
   const tiles = media.filter((t) => !t.audioFor)
   const [screen, setScreen] = useState('')
   const windows = /^Win/i.test(navigator.platform)
@@ -288,6 +297,10 @@ export default function CloudflareStage({
       if (!active) return
       active = false
       setParticipants([])
+      setPublishers({})
+      setMixes({})
+      setMedia([])
+      setScreen('')
       stateRequest.abort()
       clearTimeout(timer)
       for (const key of flows.keys()) remove(key)
@@ -423,7 +436,14 @@ export default function CloudflareStage({
           publication,
           (track) => {
             if (flows.get(publication) !== flow) return
-            flow.stream = new MediaStream([track])
+            if (audioFor && (track.kind !== 'audio' || track.readyState === 'ended')) return
+            const stream = new MediaStream([track])
+            flow.stream = stream
+            if (audioFor) {
+              track.onended = () => {
+                if (flows.get(publication)?.stream === stream) remove(publication)
+              }
+            }
             refresh()
           },
           signal,
@@ -444,6 +464,7 @@ export default function CloudflareStage({
         if (stateVersion) delay = 0
         if (!active) return
         setParticipants(state.participants ?? [])
+        setPublishers(state.publishers ?? {})
         setMessage(value => value === 'Media connection interrupted.' ? '' : value)
         const audio = Object.entries(state.audio ?? {}) as [string, string][]
         const list: string[] = [...state.publications, ...audio.map(([, handle]) => handle)]
@@ -554,7 +575,7 @@ export default function CloudflareStage({
           aria-label="Audio controls"
         >
           {!windows && screen && audioEnabled && (pairNativeAudio ? (
-            <NativeAudio key={screen} screen={screen} control={control} />
+            <HostedAudio key={screen} screen={screen} control={control} open={audioOpen} />
           ) : (
             <DesktopAudio
               key={screen}
@@ -566,18 +587,24 @@ export default function CloudflareStage({
             />
           ))}
           {screen && audioEnabled && audioStatus && <small role="status">{audioStatus}</small>}
-          {tiles.map(
-            (tile, i) =>
-              tile.key !== local && (
-                <RemoteAudio
-                  key={tile.key}
-                  screen={tile.key}
-                  label={'Screen ' + (i + 1) + ' audio'}
-                  stream={media.find((t) => t.audioFor === tile.key)?.stream}
-                  onBlocked={reportBlocked}
-                />
-              ),
-          )}
+          {tiles.map((tile, i) => {
+            if (tile.key === local) return null
+            const owner = publishers[tile.key] ?? tile.key
+            const name = participants.find(person => person.key === owner)?.name
+            const screenLabel = 'Screen ' + (i + 1)
+            const duplicateName = name && participants.some(person => person.key !== owner && person.name === name)
+            return (
+              <RemoteAudio
+                key={tile.key}
+                screen={tile.key}
+                label={(duplicateName ? `${name} (${screenLabel})` : name || screenLabel) + ' audio'}
+                mix={mixes[owner] ?? defaultMix}
+                onMix={mix => setMixes(current => ({ ...current, [owner]: mix }))}
+                stream={media.find((t) => t.audioFor === tile.key)?.stream}
+                onBlocked={reportBlocked}
+              />
+            )
+          })}
         </div>
         <button
           onClick={() => {

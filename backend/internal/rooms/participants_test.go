@@ -13,6 +13,42 @@ import (
 
 const rosterVideo = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:0\r\na=sendonly\r\n"
 
+func TestScreenPublisherKeySurvivesReplacement(t *testing.T) {
+	now := time.Now()
+	viewer := roomAccess{ref: "room", user: "viewer", participantKey: "viewer-key", voiceChecked: now, lastSeen: now, until: now.Add(time.Hour)}
+	owner := viewer
+	owner.user, owner.participantKey = "publisher", "public-room-key"
+	a := &API{now: func() time.Time { return now }, discord: &channelAccess{active: map[string]roomAccess{"view": viewer, "peer": owner}}}
+	a.EnableCloudflarePrototype(nil)
+	publish := func(peer string) *cfTrack {
+		t.Helper()
+		screen, status := a.prototype.reserve(owner, peer, cfInput{}, now, nil)
+		if status != 200 {
+			t.Fatalf("reserve screen: %d", status)
+		}
+		screen.ready = true
+		screen.operation.Unlock()
+		return screen
+	}
+	screen := publish("peer")
+	a.prototype.tracks["self"] = &cfTrack{handle: "self", room: viewer.ref, owner: "view", user: viewer.user, ready: true}
+	a.prototype.tracks["audio"] = &cfTrack{handle: "audio", room: viewer.ref, user: owner.user, ready: true, audio: true, screen: screen.handle}
+	check := func(handle string) {
+		t.Helper()
+		state, _, code := a.snapshot(viewer, "view", nil, time.Time{})
+		if code != 200 || len(state.Publishers) != 1 || state.Publishers[handle] != owner.participantKey {
+			t.Fatalf("unexpected screen mapping: %#v", state.Publishers)
+		}
+	}
+	check(screen.handle)
+	delete(a.discord.active, "peer")
+	check(screen.handle) // A departing peer's last snapshot still uses its original mix.
+	delete(a.prototype.tracks, screen.handle)
+	delete(a.prototype.tracks, "audio")
+	a.discord.active["new-tab"] = owner
+	check(publish("new-tab").handle)
+}
+
 func TestRoomParticipantVisibility(t *testing.T) {
 	f := newCFFixture(t, "https://player.test", &fakeMedia{})
 	now := time.Now()
