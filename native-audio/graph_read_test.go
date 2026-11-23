@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -106,7 +107,41 @@ exec /bin/sleep 30`)
 		t.Fatal("link deadline did not interrupt the second dump")
 	}
 	err = stopAfterGraphError(initialLinks, err)
-	if err == nil || err.Error() != "initial FL/FR link verification: waiting for stereo links: context deadline exceeded (3s)" {
+	if err == nil || err.Error() != "initial FL/FR link verification: waiting for stereo links: context deadline exceeded (3s) during pw-dump; last completed graph: capture node absent" {
+		t.Fatal(err)
+	}
+}
+
+func TestGraphReadLinkDeadlineReportsLatestSnapshot(t *testing.T) {
+	g := fixtureGraph(t)
+	for key, objects := range map[string][]graphObject{"FIRST": g[:4], "LATER": g[:6]} {
+		data, err := json.Marshal(objects)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(key, string(data))
+	}
+	mockGraphDump(t, `if [ ! -f "$DUMP_STARTED" ]; then
+  : > "$DUMP_STARTED"
+  printf '%s' "$FIRST"
+else
+  printf '%s' "$LATER"
+fi`)
+	tap := applicationTap{sourceSerial: 100, sourceID: 10, captureName: "whiterun-capture-test"}
+	err := tap.waitForLinks(t.Context())
+	if !errors.Is(err, errLinkTimeout) || !strings.HasSuffix(err.Error(), "last completed graph: capture ports have no incoming links") {
+		t.Fatalf("expected latest observation at the link deadline, got %v", err)
+	}
+}
+
+func TestGraphReadInitialDumpTimeoutHasNoTopology(t *testing.T) {
+	mockGraphDump(t, blockedDump)
+	err := new(applicationTap).waitForLinks(t.Context())
+	if !errors.Is(err, errDumpTimeout) || errors.Is(err, errLinkTimeout) {
+		t.Fatalf("expected a graph read timeout, got %v", err)
+	}
+	err = stopAfterGraphError(initialLinks, err)
+	if err == nil || err.Error() != "initial FL/FR link verification: pw-dump: context deadline exceeded (2s)" {
 		t.Fatal(err)
 	}
 }

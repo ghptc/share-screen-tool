@@ -357,6 +357,7 @@ func run() (runErr error) {
 		captureInfo["mode"] = "isolated-application"
 		captureInfo["sourceSerial"] = tap.sourceSerial
 		captureInfo["captureSerial"] = tap.captureSerial
+		captureInfo["linkStatesFLFR"] = tap.verifiedLinkStates
 	}
 	timing.emit("capture_started", captureInfo)
 	var streamError error

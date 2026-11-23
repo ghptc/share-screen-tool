@@ -25,6 +25,21 @@ After screen-bound authorization and explicit `--start --application SERIAL` con
 
 Before submitting PCM to libopus, the helper reads the actual graph and requires exactly one FL and one FR link from the selected stream into its own recorder. It checks the node serials, channel ports and incoming links again on each lease renewal. This detects graph changes at inspection time. Local applications with sufficient PipeWire permissions can still edit links between inspections. The session's lifetime follows the recorder process. Parent-death signaling covers an abruptly killed helper.
 
+### Reading an initial FL/FR verification failure
+
+On PipeWire 1.6.10, `pw-cat` sets `target.object` from `--target` and defaults two-channel raw PCM to stereo. WirePlumber 0.5.18 resolves a numeric target by `object.serial` and can link a compatible playback stream's outputs to a recorder's inputs while its existing nonexclusive headset links remain in place. `node.dont-move` prevents a metadata move from overriding that target. `node.dont-fallback` rejects an unavailable target, and `node.dont-reconnect` prevents retargeting after the initial link. [PipeWire pw-cat implementation](https://github.com/PipeWire/pipewire/blob/1.6.10/src/tools/pw-cat.c) · [WirePlumber linking policy](https://pipewire.pages.freedesktop.org/wireplumber/policies/linking.html)
+
+Use the diagnostic from the failed authorized share. The three-second deadline reports the last completed read-only graph observation. A graph inspected after helper exit can confirm the application's headset path, but teardown removes the recorder and its links.
+
+| Diagnostic | Interpretation |
+| --- | --- |
+| `capture node absent` | The snapshot had no recording node with the session's exact generated name and capture class. A brief node lifetime between snapshots is possible. |
+| `capture node has no ports` | The named recorder existed and had zero attached port objects. An incomplete FL/FR pair or unsupported layout has its own message. |
+| `capture ports have no incoming links` | Both recorder inputs existed. There were zero links into that recorder. |
+| `unexpected source entered application capture` | An incoming link originated at another node. Verification stops immediately. Duplicate or crossed channels also stop verification. |
+| `stereo link states (FL=…, FR=…)` | Each channel reports its observed state, `missing`, or `unknown`. A PipeWire link error stops verification immediately. Correctly connected `paused` links are valid idle topology. On success, optional `capture_started.linkStatesFLFR` timing metadata records the primary tap's two states in channel order. RTP delivery requires separate evidence. |
+| `pw-dump: context deadline exceeded (2s)` | A single graph read timed out. If the overall three-second limit interrupted a dump first, the message says `during pw-dump`. Any appended observation comes from an earlier completed read. |
+
 ## Alternatives evaluated
 
 | Approach | Isolation and tradeoff |

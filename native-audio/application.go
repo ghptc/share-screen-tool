@@ -91,8 +91,13 @@ func selectApplication(graph []graphObject, serial uint64) (graphObject, error) 
 }
 func stereoPorts(graph []graphObject, node uint64, direction string) ([2]uint64, error) {
 	var ports [2]uint64
+	hasPorts := false
 	for _, p := range graph {
-		if !strings.HasSuffix(p.Type, ":Port") || propID(p.Info.Props["node.id"]) != node || p.Info.Direction != direction || p.Info.Props["port.monitor"] == true {
+		if !strings.HasSuffix(p.Type, ":Port") || propID(p.Info.Props["node.id"]) != node {
+			continue
+		}
+		hasPorts = true
+		if p.Info.Direction != direction || p.Info.Props["port.monitor"] == true {
 			continue
 		}
 		channel := fmt.Sprint(p.Info.Props["audio.channel"])
@@ -104,12 +109,15 @@ func stereoPorts(graph []graphObject, node uint64, direction string) ([2]uint64,
 			index = 1
 		}
 		if index < 0 || ports[index] != 0 {
-			return ports, errors.New("application capture currently requires unambiguous stereo FL/FR ports")
+			return ports, fmt.Errorf("node has an unsupported or ambiguous %s channel layout", direction)
 		}
 		ports[index] = p.ID
 	}
+	if !hasPorts {
+		return ports, errors.New("node has no ports")
+	}
 	if ports[0] == 0 || ports[1] == 0 {
-		return ports, errors.New("stereo ports are not ready")
+		return ports, fmt.Errorf("node lacks a complete pair of FL/FR %s ports", direction)
 	}
 	return ports, nil
 }
@@ -125,43 +133,46 @@ func coreInstance(graph []graphObject) string {
 }
 
 type applicationTap struct {
-	core          string
-	sourceSerial  uint64
-	sourceID      uint64
-	captureName   string
-	captureSerial uint64
-	captureID     uint64
+	core               string
+	sourceSerial       uint64
+	sourceID           uint64
+	captureName        string
+	captureSerial      uint64
+	captureID          uint64
+	verifiedLinkStates [2]string // FL, FR in the last accepted snapshot
 }
 
-var errLinksPending = errors.New("waiting for the selected application's stereo capture links")
+// Only these observations can be retried during initial link verification.
+type pendingLinks string
+
+func (p pendingLinks) Error() string { return string(p) }
 
 // WirePlumber resolves target.object by serial and creates both links. Observe
 // the actual ports before handing any PCM to the encoder.
 func (tap *applicationTap) waitForLinks(ctx context.Context) error {
 	wait, cancel := context.WithTimeoutCause(ctx, linkVerificationTimeout, errLinkTimeout)
 	defer cancel()
+	var last pendingLinks
 	for {
 		graph, err := readGraph(wait)
-		if err != nil {
-			return err
-		}
-		if tap.captureSerial == 0 {
-			for _, n := range graph {
-				if strings.HasSuffix(n.Type, ":Node") && n.Info.Props["node.name"] == tap.captureName && n.Info.Props["media.class"] == "Stream/Input/Audio" {
-					tap.captureID = n.ID
-					tap.captureSerial = propID(n.Info.Props["object.serial"])
-					break
-				}
+		if err == nil {
+			err = tap.verifyGraph(graph)
+			if !errors.As(err, &last) {
+				return err
 			}
+			select {
+			case <-wait.Done():
+				err = context.Cause(wait)
+			case <-time.After(50 * time.Millisecond):
+				continue
+			}
+		} else if errors.Is(err, errLinkTimeout) {
+			err = fmt.Errorf("%w during pw-dump", err)
 		}
-		if err := tap.verifyGraph(graph); !errors.Is(err, errLinksPending) {
-			return err
+		if last != "" && (errors.Is(err, errLinkTimeout) || errors.Is(err, errDumpTimeout)) {
+			return fmt.Errorf("%w; last completed graph: %s", err, last)
 		}
-		select {
-		case <-wait.Done():
-			return context.Cause(wait)
-		case <-time.After(50 * time.Millisecond):
-		}
+		return err
 	}
 }
 
@@ -181,15 +192,25 @@ func (tap *applicationTap) verifyGraph(graph []graphObject) error {
 	if err != nil || source.ID != tap.sourceID {
 		return errors.New("selected application ended or changed; explicit reselection required")
 	}
-	if tap.captureSerial == 0 {
-		return errLinksPending
-	}
 	found := false
 	for _, n := range graph {
-		if n.ID == tap.captureID && n.Info.Props["media.class"] == "Stream/Input/Audio" && propID(n.Info.Props["object.serial"]) == tap.captureSerial {
+		if !strings.HasSuffix(n.Type, ":Node") || n.Info.Props["media.class"] != "Stream/Input/Audio" {
+			continue
+		}
+		serial := propID(n.Info.Props["object.serial"])
+		if tap.captureSerial == 0 && n.Info.Props["node.name"] == tap.captureName {
+			if serial == 0 {
+				return pendingLinks("capture node has no usable serial")
+			}
+			tap.captureID, tap.captureSerial = n.ID, serial
+		}
+		if tap.captureSerial != 0 && n.ID == tap.captureID && serial == tap.captureSerial {
 			found = true
 			break
 		}
+	}
+	if tap.captureSerial == 0 {
+		return pendingLinks("capture node absent")
 	}
 	if !found {
 		return errors.New("session capture node disappeared")
@@ -198,30 +219,46 @@ func (tap *applicationTap) verifyGraph(graph []graphObject) error {
 	if err != nil {
 		return err
 	}
-	inputs, err := stereoPorts(graph, tap.captureID, "input")
-	if err != nil {
-		return errLinksPending
-	}
-	var seen, linked [2]bool
+	inputs, portErr := stereoPorts(graph, tap.captureID, "input")
+	states := [2]string{"missing", "missing"}
 	for _, link := range graph {
 		if !strings.HasSuffix(link.Type, ":Link") || link.Info.InputNode != tap.captureID {
+			continue
+		}
+		if link.Info.OutputNode != source.ID {
+			return errors.New("unexpected source entered application capture")
+		}
+		if link.Info.State == "error" {
+			return errors.New("PipeWire failed to link the selected application")
+		}
+		if portErr != nil {
 			continue
 		}
 		i := 0
 		if link.Info.InputPort == inputs[1] {
 			i = 1
 		}
-		if link.Info.OutputNode != source.ID || link.Info.OutputPort != outputs[i] || link.Info.InputPort != inputs[i] || seen[i] {
-			return errors.New("unexpected source or channel entered application capture")
+		if link.Info.OutputPort != outputs[i] || link.Info.InputPort != inputs[i] || states[i] != "missing" {
+			return errors.New("unexpected or duplicate channel entered application capture")
 		}
-		if link.Info.State == "error" {
-			return errors.New("PipeWire failed to link the selected application")
+		switch link.Info.State {
+		case "unlinked", "init", "negotiating", "allocating", "paused", "active":
+			states[i] = link.Info.State
+		default:
+			states[i] = "unknown"
 		}
-		seen[i] = true
-		linked[i] = link.Info.State == "active" || link.Info.State == "paused"
 	}
-	if !linked[0] || !linked[1] {
-		return errLinksPending
+	if portErr != nil {
+		return pendingLinks("capture " + portErr.Error())
 	}
+	if states == [2]string{"missing", "missing"} {
+		return pendingLinks("capture ports have no incoming links")
+	}
+	for _, state := range states {
+		if state != "active" && state != "paused" {
+			return pendingLinks(fmt.Sprintf("stereo link states (FL=%s, FR=%s)", states[0], states[1]))
+		}
+	}
+	tap.verifiedLinkStates = states
 	return nil
 }

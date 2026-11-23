@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -22,6 +23,85 @@ func fixtureGraph(t *testing.T) []graphObject {
 		t.Fatal(err)
 	}
 	return g
+}
+
+func TestApplicationLinkDiagnostics(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		change  func([]graphObject) []graphObject
+		message string
+		pending bool
+	}{
+		{"different recorder name", func(g []graphObject) []graphObject {
+			g[1].Info.Props["node.name"] = "other-recorder"
+			return g
+		}, "capture node absent", true},
+		{"no recorder ports", func(g []graphObject) []graphObject { return g[:4] }, "capture node has no ports", true},
+		{"missing FR input", func(g []graphObject) []graphObject { return g[:5] }, "capture node lacks a complete pair of FL/FR input ports", true},
+		{"direction mismatch", func(g []graphObject) []graphObject {
+			g[5].Info.Direction = "output"
+			g[5].Info.Props["port.direction"] = "in"
+			return g
+		}, "capture node lacks a complete pair of FL/FR input ports", true},
+		{"monitor port", func(g []graphObject) []graphObject {
+			g[5].Info.Props["port.monitor"] = true
+			return g
+		}, "capture node lacks a complete pair of FL/FR input ports", true},
+		{"unpositioned port", func(g []graphObject) []graphObject {
+			g[5].Info.Props["audio.channel"] = "UNK"
+			return g
+		}, "capture node has an unsupported or ambiguous input channel layout", true},
+		{"headset links only", func(g []graphObject) []graphObject {
+			g[6].Info.InputNode, g[7].Info.InputNode = 99, 99
+			return g
+		}, "capture ports have no incoming links", true},
+		{"foreign source", func(g []graphObject) []graphObject {
+			g[7].Info.OutputNode = 99
+			return g
+		}, "unexpected source entered application capture", false},
+		{"foreign source with incomplete ports", func(g []graphObject) []graphObject {
+			g[7].Info.OutputNode = 99
+			return append(g[:5], g[6:]...)
+		}, "unexpected source entered application capture", false},
+		{"missing FR link", func(g []graphObject) []graphObject { return g[:7] }, "stereo link states (FL=active, FR=missing)", true},
+		{"both links waiting", func(g []graphObject) []graphObject {
+			g[6].Info.State, g[7].Info.State = "negotiating", "allocating"
+			return g
+		}, "stereo link states (FL=negotiating, FR=allocating)", true},
+		{"unrecognized state is redacted", func(g []graphObject) []graphObject {
+			g[6].Info.State, g[7].Info.State = "paused", "private-fixture-text"
+			return g
+		}, "stereo link states (FL=paused, FR=unknown)", true},
+		{"link error", func(g []graphObject) []graphObject {
+			g[6].Info.State = "error"
+			return g
+		}, "PipeWire failed to link the selected application", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tap := applicationTap{sourceSerial: 100, sourceID: 10, captureName: "whiterun-capture-test"}
+			err := tap.verifyGraph(tc.change(fixtureGraph(t)))
+			var pending pendingLinks
+			if err == nil || err.Error() != tc.message || errors.As(err, &pending) != tc.pending {
+				t.Fatalf("unexpected graph diagnosis: %v", err)
+			}
+		})
+	}
+}
+
+func TestApplicationPausedLinksVerifyTopology(t *testing.T) {
+	g := fixtureGraph(t)
+	tap := applicationTap{sourceSerial: 100, sourceID: 10, captureName: "whiterun-capture-test"}
+	for _, state := range []string{"paused", "active"} {
+		g[6].Info.State, g[7].Info.State = state, state
+		if err := tap.verifyGraph(g); err != nil || tap.verifiedLinkStates != [2]string{state, state} {
+			t.Fatalf("expected two verified %s links, got %v (%v)", state, tap.verifiedLinkStates, err)
+		}
+	}
+	// Recreating the recorder with the same name cannot inherit the tap.
+	g[1].Info.Props["object.serial"] = float64(201)
+	if err := tap.verifyGraph(g); err == nil || err.Error() != "session capture node disappeared" {
+		t.Fatalf("recorder replacement: %v", err)
+	}
 }
 func TestApplicationSelectionRejectsMonitorMicrophoneBrowserAndStaleSerial(t *testing.T) {
 	g := fixtureGraph(t)
