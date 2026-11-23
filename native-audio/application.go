@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -149,7 +150,7 @@ func (p pendingLinks) Error() string { return string(p) }
 
 // WirePlumber resolves target.object by serial and creates both links. Observe
 // the actual ports before handing any PCM to the encoder.
-func (tap *applicationTap) waitForLinks(ctx context.Context) error {
+func (tap *applicationTap) waitForLinks(ctx context.Context, recorderStdout io.Reader) error {
 	wait, cancel := context.WithTimeoutCause(ctx, linkVerificationTimeout, errLinkTimeout)
 	defer cancel()
 	var last pendingLinks
@@ -170,7 +171,11 @@ func (tap *applicationTap) waitForLinks(ctx context.Context) error {
 			err = fmt.Errorf("%w during pw-dump", err)
 		}
 		if last != "" && (errors.Is(err, errLinkTimeout) || errors.Is(err, errDumpTimeout)) {
-			return fmt.Errorf("%w; last completed graph: %s", err, last)
+			err = fmt.Errorf("%w; last completed graph: %s", err, last)
+			// TIOCINQ observes the kernel queue without consuming recorder output.
+			if queued := pendingPCM(recorderStdout); queued != nil {
+				err = fmt.Errorf("%w; recorder stdout queued bytes at timeout=%d", err, *queued)
+			}
 		}
 		return err
 	}
@@ -192,8 +197,9 @@ func (tap *applicationTap) verifyGraph(graph []graphObject) error {
 	if err != nil || source.ID != tap.sourceID {
 		return errors.New("selected application ended or changed; explicit reselection required")
 	}
-	found := false
-	for _, n := range graph {
+	var recorder *graphObject
+	for i := range graph {
+		n := &graph[i]
 		if !strings.HasSuffix(n.Type, ":Node") || n.Info.Props["media.class"] != "Stream/Input/Audio" {
 			continue
 		}
@@ -205,14 +211,14 @@ func (tap *applicationTap) verifyGraph(graph []graphObject) error {
 			tap.captureID, tap.captureSerial = n.ID, serial
 		}
 		if tap.captureSerial != 0 && n.ID == tap.captureID && serial == tap.captureSerial {
-			found = true
+			recorder = n
 			break
 		}
 	}
 	if tap.captureSerial == 0 {
 		return pendingLinks("capture node absent")
 	}
-	if !found {
+	if recorder == nil {
 		return errors.New("session capture node disappeared")
 	}
 	outputs, err := stereoPorts(graph, source.ID, "output")
@@ -254,6 +260,10 @@ func (tap *applicationTap) verifyGraph(graph []graphObject) error {
 	if states == [2]string{"missing", "missing"} {
 		return pendingLinks("capture ports have no incoming links")
 	}
+	if states == [2]string{"init", "init"} {
+		return pendingLinks(fmt.Sprintf("stereo link states (FL=init, FR=init); source=%s, recorder=%s, source pulse.corked=%s",
+			publicNodeState(source.Info.State), publicNodeState(recorder.Info.State), pulseCorked(source.Info.Props["pulse.corked"])))
+	}
 	for _, state := range states {
 		if state != "active" && state != "paused" {
 			return pendingLinks(fmt.Sprintf("stereo link states (FL=%s, FR=%s)", states[0], states[1]))
@@ -261,4 +271,25 @@ func (tap *applicationTap) verifyGraph(graph []graphObject) error {
 	}
 	tap.verifiedLinkStates = states
 	return nil
+}
+
+// pw-dump exposes the public node state, not the internal node->active flag.
+func publicNodeState(state string) string {
+	switch state {
+	case "error", "creating", "suspended", "idle", "running":
+		return state
+	default:
+		return "unknown"
+	}
+}
+
+func pulseCorked(value any) string {
+	switch value {
+	case true, "true":
+		return "true"
+	case false, "false":
+		return "false"
+	default:
+		return "unknown"
+	}
 }

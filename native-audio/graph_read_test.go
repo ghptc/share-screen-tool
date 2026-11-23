@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,7 +58,7 @@ func TestGraphReadCancelDuringLinkCheck(t *testing.T) {
 			ctx, cancel := context.WithCancelCause(t.Context())
 			defer cancel(nil)
 			done := make(chan error, 1)
-			go func() { done <- new(applicationTap).waitForLinks(ctx) }()
+			go func() { done <- new(applicationTap).waitForLinks(ctx, nil) }()
 			for deadline := time.Now().Add(time.Second); ; {
 				if _, err := os.Stat(started); err == nil {
 					break
@@ -99,7 +100,7 @@ fi
 : > "$DUMP_STARTED.blocked"
 exec /bin/sleep 30`)
 	tap := applicationTap{sourceSerial: 100, sourceID: 10, captureName: "pending-fixture"}
-	err = tap.waitForLinks(t.Context())
+	err = tap.waitForLinks(t.Context(), nil)
 	if !errors.Is(err, errLinkTimeout) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("unexpected link result: %v", err)
 	}
@@ -128,7 +129,7 @@ else
   printf '%s' "$LATER"
 fi`)
 	tap := applicationTap{sourceSerial: 100, sourceID: 10, captureName: "whiterun-capture-test"}
-	err := tap.waitForLinks(t.Context())
+	err := tap.waitForLinks(t.Context(), nil)
 	if !errors.Is(err, errLinkTimeout) || !strings.HasSuffix(err.Error(), "last completed graph: capture ports have no incoming links") {
 		t.Fatalf("expected latest observation at the link deadline, got %v", err)
 	}
@@ -136,13 +137,77 @@ fi`)
 
 func TestGraphReadInitialDumpTimeoutHasNoTopology(t *testing.T) {
 	mockGraphDump(t, blockedDump)
-	err := new(applicationTap).waitForLinks(t.Context())
+	err := new(applicationTap).waitForLinks(t.Context(), nil)
 	if !errors.Is(err, errDumpTimeout) || errors.Is(err, errLinkTimeout) {
 		t.Fatalf("expected a graph read timeout, got %v", err)
 	}
 	err = stopAfterGraphError(initialLinks, err)
 	if err == nil || err.Error() != "initial FL/FR link verification: pw-dump: context deadline exceeded (2s)" {
 		t.Fatal(err)
+	}
+}
+
+// The real descriptor allows TIOCINQ. Any attempt to consume the fixture
+// before verification fails the test immediately, even if the pipe is empty.
+type unreadRecorder struct{ *os.File }
+
+func (unreadRecorder) Read([]byte) (int, error) { panic("verification read recorder stdout") }
+
+func TestGraphReadInitBeforePCM(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		nextState string
+		marker    string
+	}{
+		{"persistent init with empty stdout", "init", ""},
+		{"persistent init with queued stdout", "init", "fixture"},
+		{"init then paused with unread stdout", "paused", "fixture"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := fixtureGraph(t)
+			g[0].Info.State, g[1].Info.State = "idle", "suspended"
+			g[0].Info.Props["pulse.corked"] = true
+			for _, step := range []struct{ key, state string }{{"INITIAL", "init"}, {"NEXT", tc.nextState}} {
+				if step.state == "paused" {
+					g[0].Info.State, g[1].Info.State = "running", "idle"
+					g[0].Info.Props["pulse.corked"] = false
+				}
+				g[6].Info.State, g[7].Info.State = step.state, step.state
+				data, err := json.Marshal(g)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv(step.key, string(data))
+			}
+			mockGraphDump(t, `if [ ! -f "$DUMP_STARTED" ]; then
+  : > "$DUMP_STARTED"
+  printf '%s' "$INITIAL"
+else
+  printf '%s' "$NEXT"
+fi`)
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			defer w.Close()
+			if _, err := w.WriteString(tc.marker); err != nil {
+				t.Fatal(err)
+			}
+			tap := applicationTap{sourceSerial: 100, sourceID: 10, captureName: "whiterun-capture-test"}
+			err = tap.waitForLinks(t.Context(), unreadRecorder{r})
+			if tc.nextState == "init" {
+				want := fmt.Sprintf("stereo link states (FL=init, FR=init); source=idle, recorder=suspended, source pulse.corked=true; recorder stdout queued bytes at timeout=%d", len(tc.marker))
+				if !errors.Is(err, errLinkTimeout) || !strings.HasSuffix(err.Error(), want) || tap.verifiedLinkStates != [2]string{} {
+					t.Fatalf("expected unverified link timeout, got %v (%v)", err, tap.verifiedLinkStates)
+				}
+			} else if err != nil || tap.verifiedLinkStates != [2]string{"paused", "paused"} {
+				t.Fatalf("expected verified paused links, got %v (%v)", err, tap.verifiedLinkStates)
+			}
+			if queued := pendingPCM(r); queued == nil || *queued != len(tc.marker) {
+				t.Fatal("verification consumed the fixture")
+			}
+		})
 	}
 }
 

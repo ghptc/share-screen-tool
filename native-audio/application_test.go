@@ -64,6 +64,27 @@ func TestApplicationLinkDiagnostics(t *testing.T) {
 			return append(g[:5], g[6:]...)
 		}, "unexpected source entered application capture", false},
 		{"missing FR link", func(g []graphObject) []graphObject { return g[:7] }, "stereo link states (FL=active, FR=missing)", true},
+		{"both init with unrecognized node metadata", func(g []graphObject) []graphObject {
+			g[6].Info.State, g[7].Info.State = "init", "init"
+			g[0].Info.State = "private-fixture-text"
+			g[0].Info.Props["pulse.corked"] = "private-fixture-text"
+			return g
+		}, "stereo link states (FL=init, FR=init); source=unknown, recorder=unknown, source pulse.corked=unknown", true},
+		{"both init on running uncorked source", func(g []graphObject) []graphObject {
+			g[6].Info.State, g[7].Info.State = "init", "init"
+			g[0].Info.State, g[1].Info.State = "running", "idle"
+			g[0].Info.Props["pulse.corked"] = "false"
+			return g
+		}, "stereo link states (FL=init, FR=init); source=running, recorder=idle, source pulse.corked=false", true},
+		{"one link still initializing", func(g []graphObject) []graphObject {
+			g[6].Info.State = "init"
+			return g
+		}, "stereo link states (FL=init, FR=active)", true},
+		{"foreign source while initializing", func(g []graphObject) []graphObject {
+			g[6].Info.State, g[7].Info.State = "init", "init"
+			g[7].Info.OutputNode = 99
+			return g
+		}, "unexpected source entered application capture", false},
 		{"both links waiting", func(g []graphObject) []graphObject {
 			g[6].Info.State, g[7].Info.State = "negotiating", "allocating"
 			return g

@@ -339,15 +339,15 @@ func run() (runErr error) {
 			defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
 			inputs = append(inputs, reader)
 		}
-		for _, t := range extraTaps {
-			if err := t.waitForLinks(ctx); err != nil {
+		for i, t := range extraTaps {
+			if err := t.waitForLinks(ctx, inputs[i+1]); err != nil {
 				return stopAfterGraphError(initialLinks, err)
 			}
 		}
 		input.Reader = &stereoMix{inputs: inputs}
 	}
 	if tap != nil {
-		if err := tap.waitForLinks(ctx); err != nil {
+		if err := tap.waitForLinks(ctx, pcm); err != nil {
 			return stopAfterGraphError(initialLinks, err)
 		}
 	}
