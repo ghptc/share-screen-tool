@@ -26,12 +26,23 @@ type graphObject struct {
 	} `json:"info"`
 }
 
+const graphReadTimeout = 2 * time.Second
+const linkVerificationTimeout = 3 * time.Second
+
+var errDumpTimeout = fmt.Errorf("pw-dump: %w (%s)", context.DeadlineExceeded, graphReadTimeout)
+var errLinkTimeout = fmt.Errorf("waiting for stereo links: %w (%s)", context.DeadlineExceeded, linkVerificationTimeout)
+
 func readGraph(ctx context.Context) ([]graphObject, error) {
-	c, cancel := context.WithTimeout(ctx, 2*time.Second)
+	c, cancel := context.WithTimeoutCause(ctx, graphReadTimeout, errDumpTimeout)
 	defer cancel()
 	data, err := exec.CommandContext(c, "pw-dump").Output()
+	// Wait can report SIGKILL when CommandContext terminates a running dump.
+	// Inspect the first cancellation cause before the deferred cancel runs.
+	if cause := context.Cause(c); cause != nil {
+		return nil, cause
+	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("pw-dump failed: %w", err)
 	}
 	var graph []graphObject
 	err = json.Unmarshal(data, &graph)
@@ -127,7 +138,7 @@ var errLinksPending = errors.New("waiting for the selected application's stereo 
 // WirePlumber resolves target.object by serial and creates both links. Observe
 // the actual ports before handing any PCM to the encoder.
 func (tap *applicationTap) waitForLinks(ctx context.Context) error {
-	wait, cancel := context.WithTimeout(ctx, 3*time.Second)
+	wait, cancel := context.WithTimeoutCause(ctx, linkVerificationTimeout, errLinkTimeout)
 	defer cancel()
 	for {
 		graph, err := readGraph(wait)
@@ -148,7 +159,7 @@ func (tap *applicationTap) waitForLinks(ctx context.Context) error {
 		}
 		select {
 		case <-wait.Done():
-			return fmt.Errorf("%w: %w", errLinksPending, wait.Err())
+			return context.Cause(wait)
 		case <-time.After(50 * time.Millisecond):
 		}
 	}

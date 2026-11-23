@@ -105,6 +105,24 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+const (
+	applicationDiscovery = "application discovery"
+	initialLinks         = "initial FL/FR link verification"
+	activeLinks          = "active FL/FR link verification"
+)
+
+var errTransportEnded = errors.New("media transport ended")
+
+// Callers return immediately so both a stop and a failed check release capture.
+func stopAfterGraphError(phase string, err error) error {
+	if errors.Is(err, context.Canceled) {
+		fmt.Fprintf(os.Stderr, "Native audio: %s: session stopped\n", phase)
+		return nil
+	}
+	return fmt.Errorf("%s: %w", phase, err)
+}
+
 func run() (runErr error) {
 	launcher := flag.Bool("desktop-launcher", false, "Serve the private desktop activation socket")
 	playerOrigin := flag.String("player-origin", "http://localhost:5173", "Local player origin for the desktop launcher")
@@ -133,7 +151,7 @@ func run() (runErr error) {
 	if *listApps {
 		graph, err := readGraph(context.Background())
 		if err != nil {
-			return err
+			return stopAfterGraphError(applicationDiscovery, err)
 		}
 		for _, n := range graph {
 			if applicationAllowed(graph, n) {
@@ -169,7 +187,7 @@ func run() (runErr error) {
 	if *application != 0 {
 		graph, err := readGraph(context.Background())
 		if err != nil {
-			return err
+			return stopAfterGraphError(applicationDiscovery, err)
 		}
 		core := coreInstance(graph)
 		if core == "" || (*instance != "" && core != *instance) {
@@ -202,7 +220,10 @@ func run() (runErr error) {
 			return errors.New("invalid additional application selection")
 		}
 		graph, err := readGraph(context.Background())
-		if err != nil || coreInstance(graph) != *instance {
+		if err != nil {
+			return stopAfterGraphError(applicationDiscovery, err)
+		}
+		if coreInstance(graph) != *instance {
 			return errors.New("selected PipeWire instance ended")
 		}
 		seen := map[uint64]bool{*application: true}
@@ -239,8 +260,10 @@ func run() (runErr error) {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	ctx, cancel := context.WithCancelCause(signalCtx)
+	defer cancel(nil)
 	var credentials audioCredentials
 	if err := post(ctx, base, "/native-audio/claim", "", map[string]any{"code": pair.Code, "localOnly": *localCapture}, &credentials); err != nil {
 		return err
@@ -282,7 +305,7 @@ func run() (runErr error) {
 	if credentials.Transport == "cloudflare" && tap == nil {
 		return errors.New("Cloudflare audio requires an explicitly selected application")
 	}
-	writeSample, closeMedia, err := openAudioTransport(ctx, cancel, base, credentials, timing)
+	writeSample, closeMedia, err := openAudioTransport(ctx, func() { cancel(errTransportEnded) }, base, credentials, timing)
 	if err != nil {
 		return err
 	}
@@ -318,14 +341,14 @@ func run() (runErr error) {
 		}
 		for _, t := range extraTaps {
 			if err := t.waitForLinks(ctx); err != nil {
-				return err
+				return stopAfterGraphError(initialLinks, err)
 			}
 		}
 		input.Reader = &stereoMix{inputs: inputs}
 	}
 	if tap != nil {
 		if err := tap.waitForLinks(ctx); err != nil {
-			return err
+			return stopAfterGraphError(initialLinks, err)
 		}
 	}
 	lastPCM.Store(time.Now().UnixNano())
@@ -343,7 +366,7 @@ func run() (runErr error) {
 		streamError = streamPCM(ctx, input, writeSample, timing)
 	}()
 	defer func() {
-		cancel()
+		cancel(nil)
 		_ = pcm.Close()
 		<-done
 	}()
@@ -376,11 +399,11 @@ func run() (runErr error) {
 			if tap != nil {
 				for _, t := range extraTaps {
 					if err := t.verify(ctx); err != nil {
-						return err
+						return stopAfterGraphError(activeLinks, err)
 					}
 				}
 				if err := tap.verify(ctx); err != nil {
-					return err
+					return stopAfterGraphError(activeLinks, err)
 				}
 				continue
 			}
