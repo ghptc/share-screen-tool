@@ -6,12 +6,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -153,6 +155,146 @@ type unreadRecorder struct{ *os.File }
 
 func (unreadRecorder) Read([]byte) (int, error) { panic("verification read recorder stdout") }
 
+func mockRecorderStdout(t *testing.T, marker string) unreadRecorder {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		r.Close()
+		w.Close()
+	})
+	if _, err := w.WriteString(marker); err != nil {
+		t.Fatal(err)
+	}
+	return unreadRecorder{r}
+}
+
+func idleInitGraph(t *testing.T) []graphObject {
+	t.Helper()
+	g := fixtureGraph(t)
+	g[0].Info.State, g[1].Info.State = "idle", "suspended"
+	g[6].Info.State, g[7].Info.State = "init", "init"
+	return g
+}
+
+func TestIdleApplicationStartupDiagnostic(t *testing.T) {
+	const idleMessage = "The selected application stream was idle. Audio sharing didn't start."
+	for _, tc := range []struct {
+		name      string
+		update    func([]graphObject)
+		queue     string
+		noPipe    bool
+		wantIdle  bool
+		wantLinks [2]string
+		wantError string
+	}{
+		{name: "persistent idle and init", wantIdle: true},
+		{name: "queued stdout", queue: "fixture bytes"},
+		{name: "unmeasurable stdout", noPipe: true},
+		{name: "source becomes running", update: func(g []graphObject) { g[0].Info.State = "running" }},
+		{name: "recorder leaves suspended", update: func(g []graphObject) { g[1].Info.State = "idle" }},
+		{name: "only one link remains init", update: func(g []graphObject) { g[6].Info.State = "paused" }},
+		{name: "idle source with ready paused links", update: func(g []graphObject) {
+			g[6].Info.State, g[7].Info.State = "paused", "paused"
+		}, wantLinks: [2]string{"paused", "paused"}},
+		{name: "idle source with ready active links", update: func(g []graphObject) {
+			g[6].Info.State, g[7].Info.State = "active", "active"
+		}, wantLinks: [2]string{"active", "active"}},
+		{name: "foreign source after idle observation", update: func(g []graphObject) {
+			g[7].Info.OutputNode = 99
+		}, wantError: "unexpected source entered application capture"},
+		{name: "source identity changed after idle observation", update: func(g []graphObject) {
+			g[0].Info.Props["object.serial"] = float64(101)
+		}, wantError: "selected application ended or changed; explicit reselection required"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var stdout io.Reader
+				if !tc.noPipe {
+					stdout = mockRecorderStdout(t, tc.queue)
+				}
+
+				g := idleInitGraph(t)
+				tap := applicationTap{sourceSerial: 100, sourceID: 10, captureName: "whiterun-capture-test"}
+				reads := 0
+				start := time.Now()
+				err := pollStereoLinks(t.Context(), stdout, func(context.Context) error {
+					time.Sleep(time.Millisecond) // simulated graph read on the virtual clock
+					reads++
+					if reads == 2 && tc.update != nil {
+						tc.update(g)
+					}
+					return tap.verifyGraph(g)
+				})
+				if reads < 2 || tap.verifiedLinkStates != tc.wantLinks {
+					t.Fatalf("reads=%d, verified=%v, error=%v", reads, tap.verifiedLinkStates, err)
+				}
+				switch {
+				case tc.wantLinks != [2]string{}:
+					if err != nil || reads != 2 {
+						t.Fatalf("ready links: %v after %d reads", err, reads)
+					}
+				case tc.wantError != "":
+					if err == nil || err.Error() != tc.wantError || reads != 2 {
+						t.Fatalf("expected immediate rejection, got %v after %d reads", err, reads)
+					}
+				default:
+					if !errors.Is(err, errLinkTimeout) || time.Since(start) != 3*time.Second || strings.Contains(err.Error(), idleMessage) != tc.wantIdle {
+						t.Fatalf("unexpected deadline diagnostic: %v", err)
+					}
+					if tc.wantIdle && err.Error() != idleMessage+"\nwaiting for stereo links: context deadline exceeded (3s); last completed graph: stereo link states (FL=init, FR=init); source=idle, recorder=suspended, source pulse.corked=unknown; recorder stdout queued bytes at timeout=0" {
+						t.Fatalf("lost the underlying diagnostic: %v", err)
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestIdleObservationDoesNotMaskStopOrFailedGraphRead(t *testing.T) {
+	const detail = "; last completed graph: stereo link states (FL=init, FR=init); source=idle, recorder=suspended, source pulse.corked=unknown; recorder stdout queued bytes at timeout=0"
+	for _, tc := range []struct {
+		name  string
+		cause error
+		want  string
+	}{
+		{"session canceled", context.Canceled, "context canceled"},
+		{"transport ended", errTransportEnded, "media transport ended"},
+		{"graph read timed out", errDumpTimeout, "pw-dump: context deadline exceeded (2s)" + detail},
+		{"link deadline interrupted graph read", errLinkTimeout, "waiting for stereo links: context deadline exceeded (3s) during pw-dump" + detail},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancelCause(t.Context())
+				defer cancel(nil)
+				g := idleInitGraph(t)
+				tap := applicationTap{sourceSerial: 100, sourceID: 10, captureName: "whiterun-capture-test"}
+				first := true
+				err := pollStereoLinks(ctx, mockRecorderStdout(t, ""), func(wait context.Context) error {
+					if first {
+						first = false
+						return tap.verifyGraph(g)
+					}
+					switch tc.cause {
+					case errDumpTimeout:
+						return errDumpTimeout
+					case errLinkTimeout:
+						<-wait.Done()
+					default:
+						cancel(tc.cause)
+					}
+					return context.Cause(wait)
+				})
+				if !errors.Is(err, tc.cause) || err.Error() != tc.want {
+					t.Fatalf("unexpected diagnostic: %v", err)
+				}
+			})
+		})
+	}
+}
+
 func TestGraphReadInitBeforePCM(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -185,17 +327,9 @@ func TestGraphReadInitBeforePCM(t *testing.T) {
 else
   printf '%s' "$NEXT"
 fi`)
-			r, w, err := os.Pipe()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer r.Close()
-			defer w.Close()
-			if _, err := w.WriteString(tc.marker); err != nil {
-				t.Fatal(err)
-			}
+			stdout := mockRecorderStdout(t, tc.marker)
 			tap := applicationTap{sourceSerial: 100, sourceID: 10, captureName: "whiterun-capture-test"}
-			err = tap.waitForLinks(t.Context(), unreadRecorder{r})
+			err := tap.waitForLinks(t.Context(), stdout)
 			if tc.nextState == "init" {
 				want := fmt.Sprintf("stereo link states (FL=init, FR=init); source=idle, recorder=suspended, source pulse.corked=true; recorder stdout queued bytes at timeout=%d", len(tc.marker))
 				if !errors.Is(err, errLinkTimeout) || !strings.HasSuffix(err.Error(), want) || tap.verifiedLinkStates != [2]string{} {
@@ -204,7 +338,7 @@ fi`)
 			} else if err != nil || tap.verifiedLinkStates != [2]string{"paused", "paused"} {
 				t.Fatalf("expected verified paused links, got %v (%v)", err, tap.verifiedLinkStates)
 			}
-			if queued := pendingPCM(r); queued == nil || *queued != len(tc.marker) {
+			if queued := pendingPCM(stdout); queued == nil || *queued != len(tc.marker) {
 				t.Fatal("verification consumed the fixture")
 			}
 		})

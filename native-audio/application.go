@@ -144,37 +144,45 @@ type applicationTap struct {
 }
 
 // Only these observations can be retried during initial link verification.
-type pendingLinks string
+type pendingLinks struct {
+	detail           string
+	idleSourceAtInit bool
+}
 
-func (p pendingLinks) Error() string { return string(p) }
+func (p pendingLinks) Error() string { return p.detail }
 
 // WirePlumber resolves target.object by serial and creates both links. Observe
 // the actual ports before handing any PCM to the encoder.
 func (tap *applicationTap) waitForLinks(ctx context.Context, recorderStdout io.Reader) error {
+	return pollStereoLinks(ctx, recorderStdout, tap.verify)
+}
+
+func pollStereoLinks(ctx context.Context, recorderStdout io.Reader, verify func(context.Context) error) error {
 	wait, cancel := context.WithTimeoutCause(ctx, linkVerificationTimeout, errLinkTimeout)
 	defer cancel()
 	var last pendingLinks
 	for {
-		graph, err := readGraph(wait)
-		if err == nil {
-			err = tap.verifyGraph(graph)
-			if !errors.As(err, &last) {
-				return err
-			}
+		err := verify(wait)
+		idleAtDeadline := false
+		if errors.As(err, &last) {
 			select {
 			case <-wait.Done():
 				err = context.Cause(wait)
+				idleAtDeadline = err == errLinkTimeout && last.idleSourceAtInit
 			case <-time.After(50 * time.Millisecond):
 				continue
 			}
 		} else if errors.Is(err, errLinkTimeout) {
 			err = fmt.Errorf("%w during pw-dump", err)
 		}
-		if last != "" && (errors.Is(err, errLinkTimeout) || errors.Is(err, errDumpTimeout)) {
+		if last.detail != "" && (errors.Is(err, errLinkTimeout) || errors.Is(err, errDumpTimeout)) {
 			err = fmt.Errorf("%w; last completed graph: %s", err, last)
 			// TIOCINQ observes the kernel queue without consuming recorder output.
 			if queued := pendingPCM(recorderStdout); queued != nil {
 				err = fmt.Errorf("%w; recorder stdout queued bytes at timeout=%d", err, *queued)
+				if idleAtDeadline && *queued == 0 {
+					return fmt.Errorf("The selected application stream was idle. Audio sharing didn't start.\n%w", err)
+				}
 			}
 		}
 		return err
@@ -206,7 +214,7 @@ func (tap *applicationTap) verifyGraph(graph []graphObject) error {
 		serial := propID(n.Info.Props["object.serial"])
 		if tap.captureSerial == 0 && n.Info.Props["node.name"] == tap.captureName {
 			if serial == 0 {
-				return pendingLinks("capture node has no usable serial")
+				return pendingLinks{detail: "capture node has no usable serial"}
 			}
 			tap.captureID, tap.captureSerial = n.ID, serial
 		}
@@ -216,7 +224,7 @@ func (tap *applicationTap) verifyGraph(graph []graphObject) error {
 		}
 	}
 	if tap.captureSerial == 0 {
-		return pendingLinks("capture node absent")
+		return pendingLinks{detail: "capture node absent"}
 	}
 	if recorder == nil {
 		return errors.New("session capture node disappeared")
@@ -255,18 +263,21 @@ func (tap *applicationTap) verifyGraph(graph []graphObject) error {
 		}
 	}
 	if portErr != nil {
-		return pendingLinks("capture " + portErr.Error())
+		return pendingLinks{detail: "capture " + portErr.Error()}
 	}
 	if states == [2]string{"missing", "missing"} {
-		return pendingLinks("capture ports have no incoming links")
+		return pendingLinks{detail: "capture ports have no incoming links"}
 	}
 	if states == [2]string{"init", "init"} {
-		return pendingLinks(fmt.Sprintf("stereo link states (FL=init, FR=init); source=%s, recorder=%s, source pulse.corked=%s",
-			publicNodeState(source.Info.State), publicNodeState(recorder.Info.State), pulseCorked(source.Info.Props["pulse.corked"])))
+		return pendingLinks{
+			detail: fmt.Sprintf("stereo link states (FL=init, FR=init); source=%s, recorder=%s, source pulse.corked=%s",
+				publicNodeState(source.Info.State), publicNodeState(recorder.Info.State), pulseCorked(source.Info.Props["pulse.corked"])),
+			idleSourceAtInit: source.Info.State == "idle" && recorder.Info.State == "suspended",
+		}
 	}
 	for _, state := range states {
 		if state != "active" && state != "paused" {
-			return pendingLinks(fmt.Sprintf("stereo link states (FL=%s, FR=%s)", states[0], states[1]))
+			return pendingLinks{detail: fmt.Sprintf("stereo link states (FL=%s, FR=%s)", states[0], states[1])}
 		}
 	}
 	tap.verifiedLinkStates = states
