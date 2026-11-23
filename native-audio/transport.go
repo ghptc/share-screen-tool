@@ -98,21 +98,6 @@ func openCloudflareAudio(ctx context.Context, cancel context.CancelFunc, base st
 	setup, stop := context.WithTimeout(ctx, 18*time.Second)
 	defer stop()
 	path := "/native-audio/" + cred.Session
-	go func() {
-		tick := time.NewTicker(2 * time.Second)
-		defer tick.Stop()
-		for {
-			select {
-			case <-setup.Done():
-				return
-			case <-tick.C:
-				if post(setup, base, path+"/lease", cred.Lease, struct{}{}, nil) != nil && setup.Err() == nil {
-					cancel()
-					return
-				}
-			}
-		}
-	}()
 	connected := make(chan struct{})
 	var once sync.Once
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
@@ -162,9 +147,6 @@ func openCloudflareAudio(ctx context.Context, cancel context.CancelFunc, base st
 	case <-connected:
 	case <-setup.Done():
 		return nil, nil, errors.New("audio connection ended")
-	}
-	if err = post(setup, base, path+"/ready", cred.Lease, struct{}{}, nil); err != nil {
-		return nil, nil, err
 	}
 	success = true
 	return track.WriteSample, func() { pc.Close() }, nil

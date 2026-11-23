@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { audioPost, publishGameAudio, readAudioPreference, writeAudioPreference } from './gameAudioSession'
 
-type Source = { id: string; name: string; detail: string }
+type Source = { id: string; name: string; detail: string; idle?: boolean }
 const previousSourceKey = 'whiterun.gameAudio.previousSource'
+const stoppedStatus = 'Application audio stopped. Select a source or start again.'
 const sourceLabel = (s: Source) => (s.detail && s.detail !== s.name ? s.name + ' · ' + s.detail : s.name)
 
 export default function DesktopAudio({
@@ -33,7 +34,8 @@ export default function DesktopAudio({
   const authorized = pageActive ? screen : undefined
   const sources = catalog?.screen === authorized ? catalog?.items : undefined
   const activeIDs = (selected ?? []).filter(id => sources?.some(s => s.id === id))
-  const target = activeIDs.join(',')
+  const target = (selected ?? []).join(',')
+  const [attempt, setAttempt] = useState(0)
   const offered = sources?.filter(s => !activeIDs.includes(s.id)) ?? []
   const late = offered.some(s => initial.current && !initial.current.has(s.id))
   const phase = capture?.source === target && capture.screen === authorized ? capture.status : ''
@@ -62,7 +64,8 @@ export default function DesktopAudio({
           if (!initial.current) initial.current = new Set(items.map(s => s.id))
           setSelected(current => {
             if (current !== null) return current
-            const candidate = items.find(s => s.id === previous) ?? (items.length === 1 ? items[0] : undefined)
+            const running = items.filter(s => !s.idle)
+            const candidate = running.find(s => s.id === previous) ?? (running.length === 1 ? running[0] : undefined)
             return candidate ? [candidate.id] : []
           })
           setCatalog({ screen: authorized!, items })
@@ -95,33 +98,27 @@ export default function DesktopAudio({
     const controller = new AbortController()
     const stop = () => controller.abort()
     window.addEventListener('pagehide', stop)
-    let timer: number
-    let failures = 0
-    function start() {
-      pending.current = pending.current.then(async () => {
-        if (controller.signal.aborted) return
-        try {
-          await publishGameAudio(authorized!, target, control, controller.signal, () => {
-            failures = 0
-            writeAudioPreference(previousSourceKey, target.split(',')[0])
-            setCapture({ screen: authorized!, source: target, status: 'Sharing audio' })
-          })
-        } catch {
-          /* Retry only while this screen and source remain authorized. */
-        }
-        if (!controller.signal.aborted) {
-          setCapture({ screen: authorized!, source: target, status: 'Reconnecting audio' })
-          timer = window.setTimeout(start, Math.min(12000, 2000 * 2 ** Math.min(failures++, 3)))
-        }
-      })
+    const report = (status: string) => {
+      if (!controller.signal.aborted) setCapture({ screen: authorized, source: target, status })
     }
-    start()
+    report('Starting audio')
+    pending.current = pending.current.then(async () => {
+      if (controller.signal.aborted) return
+      try {
+        await publishGameAudio(authorized, target, control, controller.signal, () => {
+          writeAudioPreference(previousSourceKey, target.split(',')[0])
+          report('Sharing audio')
+        }, report)
+      } catch {
+        // Owner-watch loss, recorder failure and expiry end this attempt.
+      }
+      report(stoppedStatus)
+    })
     return () => {
       window.removeEventListener('pagehide', stop)
       stop()
-      window.clearTimeout(timer)
     }
-  }, [authorized, target, control])
+  }, [authorized, target, control, attempt])
 
   let status = ''
   if (authorized) {
@@ -152,7 +149,7 @@ export default function DesktopAudio({
           </option>
           {sources?.map((s) => (
             <option key={s.id} value={s.id}>
-              {sourceLabel(s)}
+              {sourceLabel(s)}{s.idle ? ' (idle)' : ''}
             </option>
           ))}
         </select>
@@ -162,6 +159,8 @@ export default function DesktopAudio({
         return <li key={id}>{name} <button aria-label={'Revoke '+name} onClick={() => setSelected(activeIDs.filter(active => active !== id))}>Revoke</button></li>
       })}</ul>}
       {offered.map(s => <button key={s.id} disabled={activeIDs.length >= 8} onClick={() => setSelected([...activeIDs, s.id])}>Allow audio · {sourceLabel(s)}</button>)}
+      {phase === stoppedStatus && activeIDs.length > 0 && activeIDs.length === selected?.length &&
+        <button onClick={() => setAttempt(n => n + 1)}>Start audio again</button>}
       <p role="status">{status}</p>
     </div>
   )

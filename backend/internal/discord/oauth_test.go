@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -31,7 +32,7 @@ func TestOAuthTransaction(t *testing.T) {
 				http.Error(w, "Invalid", 403)
 				return
 			}
-			fmt.Fprint(w, `{"id":"456"}`)
+			fmt.Fprint(w, `{"id":"456","username":"test-user","global_name":"Test Member"}`)
 		}
 	}))
 	defer provider.Close()
@@ -67,7 +68,7 @@ func TestOAuthTransaction(t *testing.T) {
 		if !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteStrictMode {
 			t.Fatal("unsafe session")
 		}
-		if s, ok := o.Session(c.Value); !ok || s.User != "456" {
+		if s, ok := o.Session(c.Value); !ok || s.User != "456" || s.DisplayName != "Test Member" {
 			t.Fatal("identity mismatch")
 		}
 		again := httptest.NewRecorder()
@@ -101,5 +102,40 @@ func TestExpiredTransactionRequiresFreshDiscordLogin(t *testing.T) {
 	mux.ServeHTTP(result, callback)
 	if result.Code != http.StatusForbidden || len(o.sessions) != 0 {
 		t.Fatal("expired login resulted in an application session")
+	}
+}
+
+type avatarTransport func(*http.Request) (*http.Response, error)
+
+func (f avatarTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestRoomAvatarHidesDiscordIdentifiers(t *testing.T) {
+	hash := strings.Repeat("a", 32)
+	png := "\x89PNG\r\n\x1a\nfixture"
+	body := png
+	var requests int
+	o := NewRoomOAuth(OAuthConfig{}, nil, time.Now)
+	o.http.Transport = avatarTransport(func(r *http.Request) (*http.Response, error) {
+		requests++
+		if r.URL.String() != "https://cdn.discordapp.com/avatars/456/"+hash+".png?size=32" || r.Header.Get("Authorization") != "" {
+			t.Fatal("untrusted or credentialed avatar request")
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})
+	for _, avatar := range []string{"", "../../outside"} {
+		if o.avatar(t.Context(), discordUser{ID: "456", Avatar: avatar}) != "" {
+			t.Fatal("unsafe avatar accepted")
+		}
+	}
+	if requests != 0 {
+		t.Fatal("untrusted avatar requested")
+	}
+	user := discordUser{ID: "456", Avatar: hash}
+	if got := o.avatar(t.Context(), user); got != "data:image/png;base64,"+base64.StdEncoding.EncodeToString([]byte(png)) {
+		t.Fatal("private avatar fallback")
+	}
+	body += strings.Repeat("x", 8192)
+	if o.avatar(t.Context(), user) != "" {
+		t.Fatal("oversized avatar accepted")
 	}
 }

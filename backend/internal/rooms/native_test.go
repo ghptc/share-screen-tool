@@ -135,6 +135,18 @@ func TestNativeAuthorizationAndAssociation(t *testing.T) {
 	if code != 200 {
 		t.Fatal("lease failed")
 	}
+	for _, phase := range []string{"waiting", "ready", "sharing", "waiting"} {
+		code, _ := call(t, url, path+"/lease", credentials["lease"].(string), map[string]string{"phase": phase})
+		if code != 200 {
+			t.Fatalf("status heartbeat %s returned %d", phase, code)
+		}
+	}
+	a.nativeMu.Lock()
+	phase := a.nativeSessions[pair["session"].(string)].Phase
+	a.nativeMu.Unlock()
+	if phase != "sharing" {
+		t.Fatalf("late heartbeat regressed owner status to %q", phase)
+	}
 	watch.Body.Close()
 	deadline := time.Now().Add(2 * time.Second)
 	for {

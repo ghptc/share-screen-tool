@@ -14,12 +14,28 @@ export async function audioPost(path: string, data: unknown, signal: AbortSignal
   return response
 }
 
+// Owner-watch text lines may be split or coalesced by the HTTP proxy.
+export function audioPhaseReader(report: (text: string) => void) {
+  const decoder = new TextDecoder()
+  let pending = ''
+  return (chunk: Uint8Array) => {
+    const lines = (pending + decoder.decode(chunk, { stream: true })).split('\n')
+    pending = lines.pop() ?? ''
+    for (const line of lines) {
+      if (line === 'waiting') report('Waiting for the selected application to send audio (30-second startup limit).')
+      if (line === 'ready') report('Stereo links ready. Waiting for audio.')
+      if (line === 'sharing') report('Sharing audio')
+    }
+  }
+}
+
 export async function publishGameAudio(
   screen: string,
   source: string,
   control: string,
   signal: AbortSignal,
   ready: () => void,
+  report?: (status: string) => void,
 ) {
   signal.throwIfAborted()
   const watch = new AbortController()
@@ -49,10 +65,14 @@ export async function publishGameAudio(
     const response = await audioPost(`/api/native-audio/${session}/watch`, {}, lifetime, control)
     const reader = response.body?.getReader()
     if (!reader || (await reader.read()).done) throw new Error('Owner watch unavailable')
+    let started = false
+    const readPhase = audioPhaseReader(text => { if (!started && !lifetime.aborted) report?.(text) })
     const ended = (async () => {
       try {
-        while (!(await reader.read()).done) {
-          /* authenticated heartbeat */
+        for (;;) {
+          const chunk = await reader.read()
+          if (chunk.done) break
+          readPhase(chunk.value)
         }
       } catch {
         /* network loss or deliberate stop */
@@ -64,9 +84,10 @@ export async function publishGameAudio(
     await audioPost(
       '/player/start',
       { source: source.split(',')[0], additional: source.split(',').slice(1), code: pair.code },
-      AbortSignal.any([lifetime, AbortSignal.timeout(15000)]),
+      AbortSignal.any([lifetime, AbortSignal.timeout(50000)]),
     )
     lifetime.throwIfAborted()
+    started = true
     ready()
     await ended
   } finally {

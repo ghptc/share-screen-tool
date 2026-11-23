@@ -32,7 +32,7 @@ it.each([
   vi.stubGlobal('RTCPeerConnection', FakePeer)
   const track = { kind: 'video', stop: vi.fn() }
   const getDisplayMedia = vi.fn().mockResolvedValue({ getVideoTracks: () => [track], getTracks: () => [track] })
-  vi.stubGlobal('navigator', Object.create(navigator, { mediaDevices: { value: { getDisplayMedia } } }))
+  vi.stubGlobal('navigator', { platform: 'Linux x86_64', mediaDevices: { getDisplayMedia } })
   vi.mocked(publish).mockImplementation(async (peer, _track, signal) => {
     const publication = await signal('publish', {})
     Object.assign(peer, { connectionState: 'connected' })
@@ -56,11 +56,12 @@ it.each([
     }
   })
   vi.stubGlobal('fetch', fetch)
-  render(<CloudflareStage channel="test" identity="publisher" control="owner" onExpired={vi.fn()} onDenied={vi.fn()} />)
+  render(<CloudflareStage canPublish channel="test" identity="publisher" control="owner" onExpired={vi.fn()} onDenied={vi.fn()} />)
   fireEvent.click(screen.getByRole('button', { name: 'Audio' }))
   expect(screen.queryByText('Pair native audio helper')).toBeNull()
-  fireEvent.click(screen.getByRole('button', { name: 'Start sharing' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Share my screen' }))
   const pair = await screen.findByRole('button', { name: 'Pair native audio helper' })
+  expect(getDisplayMedia).toHaveBeenCalledWith(expect.objectContaining({ audio: false }))
   expect(paths).not.toContain('/api/native-audio/sessions')
   fireEvent.click(pair)
   await waitFor(() => expect(watch).toBeDefined())
@@ -100,7 +101,7 @@ it('offers a user gesture after remote autoplay denial without pairing a viewer'
     paths.push(path)
     return Response.json({ publications: ['screen'], audio: { screen: 'game' }, owned: [] })
   })
-  render(<CloudflareStage channel="test" identity="viewer" control="viewer" onExpired={vi.fn()} onDenied={vi.fn()} />)
+  render(<CloudflareStage canPublish={false} channel="test" identity="viewer" control="viewer" onExpired={vi.fn()} onDenied={vi.fn()} />)
   const enable = await screen.findByRole('button', { name: 'Enable audio' })
   expect(play).toHaveBeenCalledTimes(1)
   fireEvent.click(enable)

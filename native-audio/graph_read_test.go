@@ -17,6 +17,18 @@ import (
 	"time"
 )
 
+func (tap *applicationTap) waitForLinks(ctx context.Context, recorderStdout io.Reader) error {
+	return pollStereoLinks(ctx, recorderStdout, tap.verify)
+}
+
+func (tap *applicationTap) verify(ctx context.Context) error {
+	graph, err := readGraph(ctx)
+	if err != nil {
+		return err
+	}
+	return tap.verifyGraph(graph)
+}
+
 // The only executable on PATH is the fixture. It never contacts PipeWire.
 func mockGraphDump(t *testing.T, script string) string {
 	t.Helper()

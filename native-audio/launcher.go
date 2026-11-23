@@ -63,6 +63,7 @@ func serveDesktop(origin, socket string) error {
 			ID     string `json:"id"`
 			Name   string `json:"name"`
 			Detail string `json:"detail"`
+			Idle   bool   `json:"idle,omitempty"`
 		}
 		core := coreInstance(graph)
 		if core == "" {
@@ -71,7 +72,7 @@ func serveDesktop(origin, socket string) error {
 		}
 		sources := []source{}
 		for _, n := range graph {
-			if n.Info.State != "running" || !applicationAllowed(graph, n) {
+			if (n.Info.State != "running" && n.Info.State != "idle") || !applicationAllowed(graph, n) {
 				continue
 			}
 			if _, err := stereoPorts(graph, n.ID, "output"); err != nil {
@@ -86,7 +87,7 @@ func serveDesktop(origin, socket string) error {
 			if nodeName != "" && nodeName != name {
 				detail = nodeName
 			}
-			sources = append(sources, source{core + ":" + strconv.FormatUint(propID(n.Info.Props["object.serial"]), 10), name, detail})
+			sources = append(sources, source{core + ":" + strconv.FormatUint(propID(n.Info.Props["object.serial"]), 10), name, detail, n.Info.State == "idle"})
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(sources)
@@ -163,7 +164,7 @@ func serveDesktop(origin, socket string) error {
 			_ = child.Wait()
 			<-slots
 		}()
-		ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 		defer cancel()
 		select {
 		case ok := <-started:
@@ -178,6 +179,6 @@ func serveDesktop(origin, socket string) error {
 			http.Error(w, "Audio start interrupted", 408)
 		}
 	})
-	server := http.Server{Handler: mux, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 10 * time.Second}
+	server := http.Server{Handler: mux, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 48 * time.Second, IdleTimeout: 10 * time.Second}
 	return server.Serve(listener)
 }

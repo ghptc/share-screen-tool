@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 
+import { audioPhaseReader } from './gameAudioSession'
+
 export default function NativeAudio({ control, screen, status }: { control?: string; screen?: string; status?: string }) {
   const [session, setSession] = useState('')
   const [pair, setPair] = useState('')
   const [watchReady, setWatchReady] = useState(false)
+  const [phase, setPhase] = useState('')
   const [error, setError] = useState('')
   const [pending, setPending] = useState(false)
   const mounted = useRef(false)
@@ -31,8 +34,12 @@ export default function NativeAudio({ control, screen, status }: { control?: str
         if (!response.ok || !response.body) throw new Error('Could not connect to the native audio session.')
         const reader = response.body.getReader()
         try {
-          while (!(await reader.read()).done) {
-            if (!controller.signal.aborted) setWatchReady(true)
+          const readPhase = audioPhaseReader(setPhase)
+          for (;;) {
+            const chunk = await reader.read()
+            if (chunk.done || controller.signal.aborted) break
+            setWatchReady(true)
+            readPhase(chunk.value)
           }
         } finally { reader.releaseLock() }
       } catch { /* A broken owner connection also ends capture at the backend. */ }
@@ -56,7 +63,7 @@ export default function NativeAudio({ control, screen, status }: { control?: str
         void request(`${result.session}/stop`, {}).catch(() => {})
         return
       }
-      setWatchReady(false); setSession(result.session)
+      setWatchReady(false); setPhase(''); setSession(result.session)
       setPair(JSON.stringify({ apiUrl: `${location.origin}/api`, code: result.code }))
     } catch (cause) { if (mounted.current) setError(cause instanceof Error ? cause.message : 'Native audio unavailable') }
     finally { if (mounted.current) setPending(false) }
@@ -81,7 +88,7 @@ export default function NativeAudio({ control, screen, status }: { control?: str
     <button disabled={!screen || !!session || pending} onClick={() => void start()}>Pair native audio helper</button>
     {pending && <p role="status">Creating native audio pairing…</p>}
     {session && <>
-      {watchReady ? <>
+      {phase ? <p role="status">{phase}</p> : watchReady ? <>
         <label>One-time native audio pairing JSON<input type="password" autoComplete="off" readOnly value={pair} /></label>
         <button onClick={() => void copyPairingCode()}>Copy pairing code</button>
         <p>Run your installed helper with <code>--list-applications</code>. Select the game’s serial with <code>--start --application SERIAL</code>. Pipe the code from <code>systemd-ask-password</code> into the helper within one minute.</p>

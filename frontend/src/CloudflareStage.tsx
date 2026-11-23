@@ -8,6 +8,7 @@ import PublishQuality from './PublishQuality'
 
 type Flow = {
   audioFor?: string
+  displayAudio?: MediaStreamTrack
   ready?: boolean
   pc: RTCPeerConnection
   handle?: string
@@ -15,8 +16,31 @@ type Flow = {
   cancelPublication?: AbortController
   timeout?: ReturnType<typeof setTimeout>
 }
+type Participant = { key: string; name: string; avatar?: string; sharing: boolean }
 type Tile = { key: string; stream: MediaStream; audioFor?: string }
 const local = 'local'
+const localAudio = 'local-audio'
+
+function missingAudio(surface?: string) {
+  if (surface === 'browser') return 'Video only. Share again and enable tab audio in the browser picker.'
+  if (surface === 'monitor') return 'Video only. Share again and enable system audio for Entire Screen if offered. System audio includes other apps.'
+  if (surface === 'window') return 'Video only. The browser returned no window audio. Try a Chrome tab with tab audio, or choose Entire Screen if you want to share system audio.'
+  return 'Video only. The browser returned no audio track. Share again and enable audio in the picker if offered.'
+}
+
+function ParticipantStrip({ participants }: { participants: Participant[] }) {
+  return (
+    <ul className="participant-strip" aria-label="Room participants">
+      {participants.map(person => <li key={person.key}>
+        {person.avatar
+          ? <img src={person.avatar} alt="" width="24" height="24" />
+          : <span className="participant-initial" aria-hidden="true">{Array.from(person.name)[0]}</span>}
+        <span dir="auto">{person.name}</span>
+        <small>{person.sharing ? 'Sharing' : 'Watching'}</small>
+      </li>)}
+    </ul>
+  )
+}
 
 function Video({ stream }: { stream: MediaStream }) {
   const element = useRef<HTMLVideoElement>(null)
@@ -103,20 +127,25 @@ export default function CloudflareStage({
   channel,
   identity,
   control,
+  canPublish,
   onDenied,
   onExpired,
 }: {
   channel: string
   identity: string
   control: string
+  canPublish: boolean
   onExpired: () => void
   onDenied: () => void
 }) {
   const [media, setMedia] = useState<Tile[]>([])
+  const [participants, setParticipants] = useState<Participant[]>([])
   const tiles = media.filter((t) => !t.audioFor)
   const [screen, setScreen] = useState('')
+  const windows = /^Win/i.test(navigator.platform)
+  const [browserAudioStatus, setBrowserAudioStatus] = useState('')
   const [audioEnabled, setAudioEnabled] = useState(
-    () => readAudioPreference('whiterun.gameAudio.enabled') !== 'off',
+    () => !windows && readAudioPreference('whiterun.gameAudio.enabled') !== 'off',
   )
   const [audioOpen, setAudioOpen] = useState(false)
   const pairNativeAudio = import.meta.env.VITE_NATIVE_AUDIO_MODE === 'pair' ||
@@ -167,7 +196,7 @@ export default function CloudflareStage({
       setQualityBusy(false)
     }
   }
-  const start = useRef<() => void>(() => {})
+  const start = useRef<(withAudio: boolean) => void>(() => {})
   const stop = useRef<() => void>(() => {})
   const denied = useRef(onDenied)
   denied.current = onDenied
@@ -223,8 +252,20 @@ export default function CloudflareStage({
       const flow = flows.get(key)
       if (!flow) return
       flows.delete(key)
+      flow.cancelPublication?.abort()
+      if (key === localAudio) {
+        const parent = flows.get(local)
+        if (parent) {
+          parent.displayAudio?.stop()
+          setBrowserAudioStatus('Video only. Screen audio ended. Share again to include audio.')
+        }
+      }
       if (key === local) {
-        flow.cancelPublication?.abort()
+        if (windows) {
+          remove(localAudio)
+          setBrowserAudioStatus('')
+          setAudioEnabled(false)
+        }
         sender.current = undefined
         selectQuality({ fps: selectedQuality.current.fps, height: 0 })
       }
@@ -239,13 +280,14 @@ export default function CloudflareStage({
       flow.timeout = setTimeout(() => {
         if (flows.get(key) === flow) {
           remove(key)
-          setMessage('Media connection timed out.')
+          if (key !== localAudio) setMessage('Media connection timed out.')
         }
       }, 12000)
     }
     function dispose() {
       if (!active) return
       active = false
+      setParticipants([])
       stateRequest.abort()
       clearTimeout(timer)
       for (const key of flows.keys()) remove(key)
@@ -255,7 +297,7 @@ export default function CloudflareStage({
       const flow: Flow = { pc, audioFor }
       flows.set(key, flow)
       const signal: Signal = async (op, input) => {
-        const result = await request(op, input)
+        const result = await request(op, key === localAudio && op === 'publish' ? { ...input, screen: audioFor } : input)
         if (result.handle) flow.handle = result.handle
         if (!active || flows.get(key) !== flow) {
           if (result.handle) void request('close', { handle: result.handle }).catch(() => {})
@@ -273,11 +315,18 @@ export default function CloudflareStage({
         if (pc.connectionState === 'connecting' || pc.connectionState === 'disconnected')
           waitForConnection(key, flow)
         else clearTimeout(flow.timeout)
-        if (key === local && flow.handle && pc.connectionState === 'connected')
+        if ((key === local || key === localAudio) && flow.handle && pc.connectionState === 'connected')
           void signal('ready', { handle: flow.handle })
             .then(() => {
+              const firstReady = !flow.ready
               flow.ready = true
               refresh()
+              if (firstReady && key === local && flow.displayAudio) void publishDisplayAudio(flow)
+              if (key === localAudio) {
+                const surface = flows.get(local)?.stream?.getVideoTracks()[0]?.getSettings().displaySurface
+                setBrowserAudioStatus(surface === 'browser' ? 'Sharing tab audio.' :
+                  surface === 'monitor' ? 'Sharing system audio, including sounds from other apps.' : 'Sharing picker audio. If you selected system audio, other apps are included.')
+              }
             })
             .catch(() => {
               if (flows.get(key) === flow) remove(key)
@@ -285,15 +334,31 @@ export default function CloudflareStage({
       }
       return { flow, signal }
     }
-    start.current = async () => {
-      if (!active || flows.has(local)) return
+    async function publishDisplayAudio(parent: Flow) {
+      const track = parent.displayAudio
+      if (flows.get(local) !== parent || !track || track.readyState !== 'live' || !parent.handle || flows.has(localAudio)) return
+      try {
+        const { flow, signal } = attach(localAudio, parent.handle)
+        flow.cancelPublication = new AbortController()
+        await publish(flow.pc, track, signal, undefined, flow.cancelPublication.signal)
+        if (flows.get(localAudio) === flow && flow.pc.connectionState === 'new') waitForConnection(localAudio, flow)
+      } catch {
+        if (flows.get(local) !== parent || parent.displayAudio?.readyState === 'ended') return
+        if (flows.has(localAudio)) remove(localAudio)
+        else track.stop()
+        setBrowserAudioStatus('Video only. Screen audio could not connect. Stop sharing and try again.')
+      }
+    }
+    start.current = async (withAudio) => {
+      if (!active || !canPublish || flows.has(local)) return
       setBusy(true)
       setMessage('')
       const { flow, signal } = attach(local)
       try {
         const stream = await navigator.mediaDevices.getDisplayMedia({
           video: { frameRate: { ideal: nativeTarget.fps, max: nativeTarget.fps } },
-          audio: false,
+          audio: withAudio,
+          ...(withAudio && { systemAudio: 'include', windowAudio: 'window', selfBrowserSurface: 'exclude' }),
         })
         if (flows.get(local) !== flow) {
           stream.getTracks().forEach((t) => t.stop())
@@ -301,6 +366,22 @@ export default function CloudflareStage({
         }
         flow.stream = stream
         const [track] = stream.getVideoTracks()
+        if (windows) {
+          const audioTracks = stream.getAudioTracks()
+          const audio = withAudio ? audioTracks.find(t => t.readyState === 'live') : undefined
+          for (const extra of audioTracks) if (extra !== audio) extra.stop()
+          flow.displayAudio = audio
+          if (audio) {
+            setBrowserAudioStatus('Connecting screen audio…')
+            audio.onended = () => {
+              if (flows.get(local) !== flow) return
+              remove(localAudio)
+              setBrowserAudioStatus('Video only. The browser stopped sharing audio.')
+            }
+          } else if (withAudio) {
+            setBrowserAudioStatus(missingAudio(track.getSettings().displaySurface))
+          }
+        }
         track.onended = () => {
           if (flows.get(local) === flow) remove(local)
         }
@@ -362,11 +443,13 @@ export default function CloudflareStage({
         retryDelay = 2500
         if (stateVersion) delay = 0
         if (!active) return
+        setParticipants(state.participants ?? [])
+        setMessage(value => value === 'Media connection interrupted.' ? '' : value)
         const audio = Object.entries(state.audio ?? {}) as [string, string][]
         const list: string[] = [...state.publications, ...audio.map(([, handle]) => handle)]
         for (const [key, flow] of flows) {
           if (
-            (key !== local && !list.includes(key)) ||
+            (key !== local && key !== localAudio && !list.includes(key)) ||
             (flow.handle && handles.includes(flow.handle) && !state.owned.includes(flow.handle))
           )
             remove(key)
@@ -375,6 +458,8 @@ export default function CloudflareStage({
           if (!flows.has(key)) void watch(key, audio.find(([, handle]) => handle === key)?.[0])
       } catch {
         if (active) {
+          setParticipants([])
+          stateVersion = undefined
           delay = retryDelay
           retryDelay = Math.min(60000, retryDelay * 2)
           for (const key of flows.keys()) remove(key)
@@ -390,11 +475,13 @@ export default function CloudflareStage({
       window.removeEventListener('pagehide', dispose)
       dispose()
     }
-  }, [channel, identity])
+  }, [channel, identity, canPublish, windows])
 
   const focused = tiles.length > 1 && tiles.some((t) => t.key === focus)
   const sharing = tiles.some((t) => t.key === local)
-  return (
+  const audioNotice = browserAudioStatus || (windows && audioEnabled && !sharing
+    ? 'Choose audio in the browser picker. System audio can include other apps and notifications.' : '')
+  return (<>
     <div className="player-stage">
       {tiles.length ? (
         <div
@@ -424,9 +511,9 @@ export default function CloudflareStage({
           <h2>No active screens</h2>
         </div>
       )}
-      {message && (
-        <p className="player-message" role="alert">
-          {message}
+      {(message || audioNotice) && (
+        <p className="player-message" role={message ? 'alert' : 'status'}>
+          {[message, audioNotice].filter(Boolean).join(' ')}
         </p>
       )}
       <div className="player-dock">
@@ -436,24 +523,25 @@ export default function CloudflareStage({
           <PublishQuality value={quality} settings={sender.current?.track?.getSettings()}
             busy={busy || qualityBusy} sharing={sharing} onChange={target => void changeQuality(target)} />
         </div>}
-        <button
+        {canPublish && <button
           className="share-action"
           disabled={busy}
-          onClick={() => (sharing ? stop.current() : start.current())}
+          onClick={() => (sharing ? stop.current() : start.current(windows && audioEnabled))}
         >
-          {busy ? 'Opening picker…' : sharing ? 'Stop sharing' : 'Start sharing'}
-        </button>
-        <label className="share-audio-toggle">
+          {busy ? 'Opening picker…' : sharing ? 'Stop sharing' : 'Share my screen'}
+        </button>}
+        {canPublish && <label className="share-audio-toggle">
           <input
             type="checkbox"
             checked={audioEnabled}
+            disabled={windows && (busy || sharing)}
             onChange={(e) => {
               setAudioEnabled(e.target.checked)
-              writeAudioPreference('whiterun.gameAudio.enabled', e.target.checked ? 'on' : 'off')
+              if (!windows) writeAudioPreference('whiterun.gameAudio.enabled', e.target.checked ? 'on' : 'off')
             }}
           />
           Share audio
-        </label>
+        </label>}
         <button aria-expanded={audioOpen} onClick={() => setAudioOpen(!audioOpen)}>
           {screen && audioEnabled && offer && !audioOpen ? 'Allow audio' : 'Audio'}
         </button>
@@ -465,7 +553,7 @@ export default function CloudflareStage({
           role="region"
           aria-label="Audio controls"
         >
-          {screen && audioEnabled && (pairNativeAudio ? (
+          {!windows && screen && audioEnabled && (pairNativeAudio ? (
             <NativeAudio key={screen} screen={screen} control={control} />
           ) : (
             <DesktopAudio
@@ -504,5 +592,6 @@ export default function CloudflareStage({
         </button>
       </div>
     </div>
-  )
+    {participants.length > 0 && <ParticipantStrip participants={participants} />}
+  </>)
 }

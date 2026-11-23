@@ -114,6 +114,36 @@ const (
 
 var errTransportEnded = errors.New("media transport ended")
 
+// Wait for child exit independently of graph polling or a blocked PCM read.
+// Use our own pipe so exec.Wait cannot close a descriptor under the reader.
+func startRecorder(cmd *exec.Cmd, cancel context.CancelCauseFunc) (*os.File, func(), error) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	cmd.Stdout, cmd.Stderr = w, os.Stderr
+	err = cmd.Start()
+	w.Close()
+	if err != nil {
+		r.Close()
+		return nil, nil, err
+	}
+	done := make(chan struct{})
+	go func() {
+		err := cmd.Wait()
+		if err == nil {
+			err = io.EOF
+		}
+		cancel(fmt.Errorf("selected audio recorder exited: %w", err))
+		close(done)
+	}()
+	return r, func() {
+		r.Close()
+		_ = cmd.Process.Kill()
+		<-done
+	}, nil
+}
+
 // Callers return immediately so both a stop and a failed check release capture.
 func stopAfterGraphError(phase string, err error) error {
 	if errors.Is(err, context.Canceled) {
@@ -264,6 +294,7 @@ func run() (runErr error) {
 	defer stopSignals()
 	ctx, cancel := context.WithCancelCause(signalCtx)
 	defer cancel(nil)
+	claimedAt := time.Now()
 	var credentials audioCredentials
 	if err := post(ctx, base, "/native-audio/claim", "", map[string]any{"code": pair.Code, "localOnly": *localCapture}, &credentials); err != nil {
 		return err
@@ -274,6 +305,23 @@ func run() (runErr error) {
 		defer c()
 		_ = post(cleanup, base, "/native-audio/"+credentials.Session+"/stop", credentials.Lease, struct{}{}, nil)
 	}()
+	deadline := claimedAt.Add(applicationStartupLimit)
+	startTimer := time.AfterFunc(time.Until(deadline), func() { cancel(errStartupExpired) })
+	defer startTimer.Stop()
+	var phase atomic.Value
+	phase.Store("starting")
+	path := "/native-audio/" + credentials.Session
+	var lease helperLease
+	lease.granted(claimedAt)
+	renew := func(c context.Context) error {
+		return post(c, base, path+"/lease", credentials.Lease, map[string]any{"phase": phase.Load()}, nil)
+	}
+	leaseDone := make(chan struct{})
+	go func() {
+		defer close(leaseDone)
+		cancel(lease.supervise(ctx, renew))
+	}()
+	defer func() { cancel(nil); <-leaseDone }()
 	timing, err := openTiming(*timingPath)
 	if err != nil {
 		return err
@@ -294,14 +342,6 @@ func run() (runErr error) {
 	// Refuse fallback/reconnection to a different device. Sink removal ends this run.
 	capture := exec.CommandContext(ctx, "pw-cat", "--record", "--raw", "--target", serial, "--rate", "48000", "--channels", "2", "--format", "s16", "--latency", "20ms", "--properties", properties, "-")
 	capture.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
-	pcm, err := capture.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	var lastPCM atomic.Int64
-	lastPCM.Store(time.Now().UnixNano())
-	input := &activityReader{Reader: pcm, last: &lastPCM, timing: timing}
-	capture.Stderr = os.Stderr
 	if credentials.Transport == "cloudflare" && tap == nil {
 		return errors.New("Cloudflare audio requires an explicitly selected application")
 	}
@@ -310,10 +350,30 @@ func run() (runErr error) {
 		return err
 	}
 	defer closeMedia()
-	if err := capture.Start(); err != nil {
+	if tap != nil {
+		// Pairing and transport setup can outlive the selected PipeWire object.
+		graph, err := readGraph(ctx)
+		if err != nil {
+			return err
+		}
+		for _, selected := range append(extraTaps, tap) {
+			n, err := selectApplication(graph, selected.sourceSerial)
+			if err != nil || n.ID != selected.sourceID || coreInstance(graph) != selected.core {
+				return errors.New("selected application ended or changed; explicit reselection required")
+			}
+		}
+	}
+	pcm, stopCapture, err := startRecorder(capture, cancel)
+	if err != nil {
 		return err
 	}
-	defer func() { _ = capture.Process.Kill(); _ = capture.Wait() }()
+	defer stopCapture()
+	var lastPCM atomic.Int64
+	input := &activityReader{Reader: pcm, last: &lastPCM, timing: timing}
+	var recorders []recordingInput
+	if tap != nil {
+		recorders = append(recorders, recordingInput{tap: tap, stdout: pcm})
+	}
 	if len(extraTaps) > 0 {
 		inputs := []io.Reader{pcm}
 		for _, extra := range extraTaps {
@@ -328,29 +388,33 @@ func run() (runErr error) {
 			}
 			cmd := exec.CommandContext(ctx, "pw-cat", args...)
 			cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
-			reader, err := cmd.StdoutPipe()
+			reader, stopExtra, err := startRecorder(cmd, cancel)
 			if err != nil {
 				return err
 			}
-			cmd.Stderr = os.Stderr
-			if err = cmd.Start(); err != nil {
-				return err
-			}
-			defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+			defer stopExtra()
 			inputs = append(inputs, reader)
-		}
-		for i, t := range extraTaps {
-			if err := t.waitForLinks(ctx, inputs[i+1]); err != nil {
-				return stopAfterGraphError(initialLinks, err)
-			}
+			recorders = append(recorders, recordingInput{tap: extra, stdout: reader})
 		}
 		input.Reader = &stereoMix{inputs: inputs}
 	}
 	if tap != nil {
-		if err := tap.waitForLinks(ctx, pcm); err != nil {
+		check := func(c context.Context) error {
+			graph, err := readGraph(c)
+			if err != nil {
+				return err
+			}
+			return checkStartupGraph(graph, recorders)
+		}
+		if err := waitForApplication(ctx, check, func() {
+			phase.Store("waiting")
+			fmt.Fprintln(os.Stderr, "Waiting for the selected application to send audio (30-second startup limit).")
+		}); err != nil {
 			return stopAfterGraphError(initialLinks, err)
 		}
 	}
+	phase.Store("ready")
+	fmt.Fprintln(os.Stderr, "Audio input ready. Waiting for the first sample.")
 	lastPCM.Store(time.Now().UnixNano())
 	captureInfo := map[string]any{"pid": capture.Process.Pid, "mode": "mixed-monitor-diagnostic"}
 	if tap != nil {
@@ -360,6 +424,48 @@ func run() (runErr error) {
 		captureInfo["linkStatesFLFR"] = tap.verifiedLinkStates
 	}
 	timing.emit("capture_started", captureInfo)
+	// Freeze the admitted route for the first write and active checks. Each
+	// verifier runs on a value copy, so simultaneous checks cannot repin it.
+	admitted := make([]applicationTap, 0, len(recorders))
+	waitingForIdleFrame := false
+	for _, r := range recorders {
+		admitted = append(admitted, *r.tap)
+		waitingForIdleFrame = waitingForIdleFrame || r.idle || r.tap.verifiedIdle
+	}
+	verifyAdmitted := func() error {
+		if len(admitted) == 0 {
+			return nil
+		}
+		graph, err := readGraph(ctx)
+		if err != nil {
+			return err
+		}
+		for _, pinned := range admitted {
+			if err := pinned.verifyGraph(graph); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	checkFirst := func() error {
+		if err := renew(ctx); err != nil {
+			return err
+		}
+		return verifyAdmitted()
+	}
+	writeSample = startupWriter(ctx, &lease, deadline, startTimer, checkFirst, writeSample, func() error {
+		if credentials.Transport == "cloudflare" {
+			if err := post(ctx, base, path+"/ready", credentials.Lease, map[string]string{"phase": "sharing"}, nil); err != nil {
+				return err
+			}
+		}
+		phase.Store("sharing")
+		if *localCapture {
+			fmt.Fprintln(os.Stdout, "ready")
+		}
+		fmt.Fprintln(os.Stderr, "Sharing application audio.")
+		return nil
+	})
 	var streamError error
 	done := make(chan struct{})
 	go func() {
@@ -371,19 +477,15 @@ func run() (runErr error) {
 		_ = pcm.Close()
 		<-done
 	}()
-	if *localCapture {
-		fmt.Fprintln(os.Stdout, "ready")
-	}
-	fmt.Fprintln(os.Stderr, "Publishing selected audio as Opus stereo 48 kHz / requested 128 kbps. Ctrl-C stops. This is not a measured network bitrate.")
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return stopAfterGraphError("session", context.Cause(ctx))
 		case <-done:
 			if ctx.Err() != nil {
-				return nil
+				return stopAfterGraphError("session", context.Cause(ctx))
 			}
 			return fmt.Errorf("audio stream ended; list and select the source again to resume: %w", streamError)
 		case <-ticker.C:
@@ -391,19 +493,11 @@ func run() (runErr error) {
 				return fmt.Errorf("timing log failed: %w", err)
 			}
 
-			if time.Since(time.Unix(0, lastPCM.Load())) > 5*time.Second {
+			if (!waitingForIdleFrame || phase.Load() == "sharing") && time.Since(time.Unix(0, lastPCM.Load())) > 5*time.Second {
 				return errors.New("PipeWire capture stalled; start again explicitly after checking the device")
 			}
-			if err := post(ctx, base, "/native-audio/"+credentials.Session+"/lease", credentials.Lease, struct{}{}, nil); err != nil {
-				return err
-			}
 			if tap != nil {
-				for _, t := range extraTaps {
-					if err := t.verify(ctx); err != nil {
-						return stopAfterGraphError(activeLinks, err)
-					}
-				}
-				if err := tap.verify(ctx); err != nil {
+				if err := verifyAdmitted(); err != nil {
 					return stopAfterGraphError(activeLinks, err)
 				}
 				continue

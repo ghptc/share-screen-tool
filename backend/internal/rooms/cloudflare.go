@@ -54,6 +54,7 @@ type cfInput struct {
 	Version     string   `json:"version,omitempty"`
 	Handles     []string `json:"handles,omitempty"`
 	Publication string   `json:"publication"`
+	Screen      string   `json:"screen,omitempty"`
 	Handle      string   `json:"handle"`
 	Mid         string   `json:"mid"`
 	SDP         string   `json:"sdp"`
@@ -73,7 +74,7 @@ func singleMedia(raw, mid, direction, kind string) bool {
 		return false
 	}
 	if kind == "audio" {
-		// Every advertised audio payload in the helper offer must be stereo-capable Opus.
+		// Screen audio negotiates one stereo-capable Opus payload.
 		if len(m.MediaName.Formats) != 1 {
 			return false
 		}
@@ -118,21 +119,25 @@ func (a *API) cfOwner(r *http.Request) (roomAccess, string, int) {
 	if !b.mediaRequests.Allow() {
 		return roomAccess{}, "", 429
 	}
-	b, ok = a.validDiscord(r.Context(), "dc-"+ref, id)
-	if !ok {
-		return roomAccess{}, "", 403
-	}
-	return b, id, 200
+	b, status := a.checkDiscord(r.Context(), "dc-"+ref, id)
+	return b, id, status
 }
-func (g *cfRegistry) reserve(b roomAccess, id, source string, now time.Time, helper *nativeSession) (*cfTrack, int) {
+func (g *cfRegistry) reserve(b roomAccess, id string, in cfInput, now time.Time, helper *nativeSession) (*cfTrack, int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if len(g.tracks) >= 512 {
 		return nil, 429
 	}
+	source, parent := in.Publication, in.Screen
 	if helper != nil {
-		screen := g.tracks[helper.Screen]
+		parent = helper.Screen
+	}
+	if helper != nil || parent != "" {
+		screen := g.tracks[parent]
 		if screen == nil || screen.room != b.ref || screen.owner != id || screen.audio || screen.publication != "" || screen.closing || !screen.ready {
+			if helper == nil {
+				return nil, 404
+			}
 			return nil, 403
 		}
 	}
@@ -147,12 +152,12 @@ func (g *cfRegistry) reserve(b roomAccess, id, source string, now time.Time, hel
 		if t.room != b.ref {
 			continue
 		}
-		if helper != nil && t.screen == helper.Screen {
+		if parent != "" && t.screen == parent {
 			return nil, 409
 		}
 		if t.publication == "" && !t.audio {
 			slots++
-			if helper == nil && source == "" && t.user == b.user {
+			if parent == "" && source == "" && t.user == b.user {
 				return nil, 409
 			}
 		}
@@ -160,13 +165,15 @@ func (g *cfRegistry) reserve(b roomAccess, id, source string, now time.Time, hel
 			return nil, 409
 		}
 	}
-	if helper == nil && source == "" && slots >= 4 {
+	if parent == "" && source == "" && slots >= 4 {
 		return nil, 409
 	}
 	t := &cfTrack{handle: randomID(18), room: b.ref, owner: id, user: b.user, publication: source, seen: now, until: b.until}
-	if helper != nil {
-		t.screen = helper.Screen
-		t.helper = helper.ID
+	if parent != "" {
+		t.screen = parent
+		if helper != nil {
+			t.helper = helper.ID
+		}
 		t.audio = true
 	} else if source != "" {
 		t.audio = g.tracks[source].audio
@@ -213,15 +220,19 @@ func (g *cfRegistry) closeTrack(ctx context.Context, t *cfTrack) bool {
 }
 func (a *API) cfNew(w http.ResponseWriter, r *http.Request, b roomAccess, id string, in cfInput, send bool, helper *nativeSession) {
 	g := a.prototype
+	if in.Screen != "" && (!send || helper != nil) {
+		fail(w, 400, "Unexpected screen association")
+		return
+	}
 	kind := "video"
-	if helper != nil {
+	if helper != nil || in.Screen != "" {
 		kind = "audio"
 	}
 	if (send && (in.Publication != "" || !singleMedia(in.SDP, in.Mid, "sendonly", kind))) || (!send && in.Publication == "") {
 		fail(w, 400, "Expected one authorized media track")
 		return
 	}
-	t, status := g.reserve(b, id, in.Publication, a.now(), helper)
+	t, status := g.reserve(b, id, in, a.now(), helper)
 	if status != 200 {
 		fail(w, status, "Screen unavailable")
 		return
@@ -294,6 +305,10 @@ func (a *API) cfSignal(w http.ResponseWriter, r *http.Request) {
 	g := a.prototype
 	switch op {
 	case "publish", "subscribe":
+		if op == "publish" && !a.discord.canPublish(b.user) {
+			fail(w, 403, "Screen publishing permission required")
+			return
+		}
 		a.cfNew(w, r, b, id, in, op == "publish", nil)
 		return
 	case "state":
@@ -331,7 +346,7 @@ func (a *API) cfSignal(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "Track unavailable")
 		return
 	}
-	if op == "ready" && t.publication == "" && !t.audio {
+	if op == "ready" && t.publication == "" && t.helper == "" {
 		t.ready = true
 		g.changedLocked()
 		t.seen = a.now()

@@ -215,13 +215,13 @@ try {
       })
       if (expiry) await page.clock.install()
       await page.goto(origin + '/r/' + ref)
-      await page.getByRole('button', { name: 'Start sharing' }).waitFor({ timeout: 10000 })
+      await page.getByRole('button', { name: 'Share my screen' }).waitFor({ timeout: 10000 })
       if (await page.evaluate(() => window.captureCount !== 0)) throw Error('Capture before consent')
       return page
     }),
   )
   stage = 'publish'
-  await Promise.all(pages.map((p) => p.getByRole('button', { name: 'Start sharing' }).click()))
+  await Promise.all(pages.map((p) => p.getByRole('button', { name: 'Share my screen' }).click()))
   stage = 'remote playback'
   const results = await Promise.all(pages.map(measure))
   if (!withAudio && !expiry) {
@@ -296,7 +296,7 @@ try {
       if (path.endsWith('/discord/callback') && response.status() === 303) callbacks++
     })
     await fresh.goto(origin + '/r/' + ref)
-    await fresh.getByRole('button', { name: 'Start sharing' }).waitFor({ timeout: 15000 })
+    await fresh.getByRole('button', { name: 'Share my screen' }).waitFor({ timeout: 15000 })
     if (callbacks !== 1 || joinStatuses.join(',') !== '401,200') throw Error('Fresh OAuth admission failed')
     if (await fresh.evaluate(() => window.captureCount !== 0)) throw Error('Re-entry started capture')
     console.log(

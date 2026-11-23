@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { publish, ScreenIceGatheringError } from './cloudflarePeer'
+import { publish, subscribe, ScreenIceGatheringError } from './cloudflarePeer'
 
 function screenPeer() {
   const offer = { type: 'offer' as const, sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:0\r\na=sendonly\r\n' }
@@ -128,4 +128,31 @@ it('removes the wait and all peer listeners immediately when the publication is 
     expect(removed).toHaveBeenCalledWith(type, listener)
   expect(send).not.toHaveBeenCalled()
   expect(vi.getTimerCount()).toBe(0)
+})
+
+it('subscribes to the advertised audio handle and answers with stereo Opus', async () => {
+  const opus = { mimeType: 'audio/opus', clockRate: 48000, channels: 2 }
+  vi.stubGlobal('RTCRtpReceiver', { getCapabilities: () => ({ codecs: [opus] }) })
+  try {
+    const track = { kind: 'audio' } as MediaStreamTrack
+    const receiver = { receiver: { track }, setCodecPreferences: vi.fn() }
+    const peer = {
+      iceGatheringState: 'complete', localDescription: null as RTCSessionDescriptionInit | null,
+      getTransceivers: () => [receiver], setRemoteDescription: vi.fn(),
+      createAnswer: () => ({ type: 'answer', sdp: 'm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2\r\na=recvonly\r\n' }),
+      async setLocalDescription(answer: RTCSessionDescriptionInit) { this.localDescription = answer },
+    }
+    const signal = vi.fn().mockResolvedValueOnce({ handle: 'my-subscription', sdp: 'audio-offer' }).mockResolvedValueOnce({})
+    const onTrack = vi.fn()
+    const pc = peer as unknown as RTCPeerConnection
+    await subscribe(pc, 'screen-audio', onTrack, signal)
+    pc.ontrack!.call(pc, { track } as RTCTrackEvent)
+    expect(signal).toHaveBeenNthCalledWith(1, 'subscribe', { publication: 'screen-audio' })
+    expect(peer.setRemoteDescription).toHaveBeenCalledWith({ type: 'offer', sdp: 'audio-offer' })
+    expect(receiver.setCodecPreferences).toHaveBeenCalledWith([opus])
+    expect(signal).toHaveBeenNthCalledWith(2, 'answer', { handle: 'my-subscription', sdp: expect.stringContaining('a=fmtp:111 stereo=1') })
+    expect(onTrack).toHaveBeenCalledWith(track)
+  } finally {
+    vi.unstubAllGlobals()
+  }
 })

@@ -44,7 +44,13 @@ func Simulator(c *Config, key string, initial FixtureState) http.Handler {
 		mu.Lock()
 		defer mu.Unlock()
 		v, ok := voices[u]
-		return v.p, ok && state.Online && v.guild == g && v.p.Channel != ""
+		if !state.Online {
+			return Presence{}, false
+		}
+		if !ok || v.guild != g {
+			return Presence{}, true
+		}
+		return v.p, true
 	}))
 	m.HandleFunc("POST /scenario", func(w http.ResponseWriter, r *http.Request) {
 		if !AuthorizedService(key, r.Header.Get("Authorization")) {
@@ -133,7 +139,7 @@ func Simulator(c *Config, key string, initial FixtureState) http.Handler {
 			http.Error(w, "Denied", 403)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"id": v.user})
+		json.NewEncoder(w).Encode(map[string]string{"id": v.user, "username": "Fixture member"})
 	})
 	return m
 }

@@ -127,6 +127,9 @@ func (g *Gateway) Observe(e *dg.Event) bool {
 	}
 	return true
 }
+
+// Lookup returns known=false until the Gateway can prove membership or absence.
+// An empty presence with known=true is a confirmed absence.
 func (g *Gateway) Lookup(guild, user string, lastAck time.Time) (Presence, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -135,7 +138,10 @@ func (g *Gateway) Lookup(guild, user string, lastAck time.Time) (Presence, bool)
 		return Presence{}, false
 	}
 	p, ok := s.users[user]
-	return p, ok && s.channels[p.Channel]
+	if !ok || !s.channels[p.Channel] {
+		return Presence{}, true
+	}
+	return p, true
 }
 func AuthorizedService(key, supplied string) bool {
 	a, b := sha256.Sum256([]byte("Bearer "+key)), sha256.Sum256([]byte(supplied))
@@ -154,9 +160,13 @@ func VoiceHandler(key string, lookup func(string, string) (Presence, bool)) http
 			http.Error(w, "Invalid query", 400)
 			return
 		}
-		p, ok := lookup(q.Guild, q.User)
-		if !ok {
-			http.Error(w, "Voice membership unavailable", 403)
+		p, known := lookup(q.Guild, q.User)
+		if !known {
+			http.Error(w, "Voice authority unavailable", 503)
+			return
+		}
+		if p.Channel == "" {
+			w.WriteHeader(http.StatusNoContent) // Confirmed absent in a synchronized snapshot.
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

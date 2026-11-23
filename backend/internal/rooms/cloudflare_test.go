@@ -200,7 +200,7 @@ func TestCloudflarePublisherLimitAndCleanup(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			id := strconv.Itoa(n)
-			p, code := g.reserve(roomAccess{ref: "room", user: id}, id, "", time.Now(), nil)
+			p, code := g.reserve(roomAccess{ref: "room", user: id}, id, cfInput{}, time.Now(), nil)
 			if p != nil {
 				p.session = id
 				p.mid = "0"
@@ -265,7 +265,7 @@ func TestCloudflareAudioIsBoundToScreenAndLease(t *testing.T) {
 		if i > 0 {
 			b.user, id = strconv.Itoa(i), strconv.Itoa(i)
 		}
-		v, code := g.reserve(b, id, "", time.Now(), nil)
+		v, code := g.reserve(b, id, cfInput{}, time.Now(), nil)
 		if code != 200 {
 			t.Fatal("expected free screen slot")
 		}
@@ -276,32 +276,32 @@ func TestCloudflareAudioIsBoundToScreenAndLease(t *testing.T) {
 		}
 	}
 	helper := nativeSession{ID: "test-helper", Screen: screen.handle}
-	if _, code := g.reserve(owner, "other-peer", "", time.Now(), &helper); code != 403 {
+	if _, code := g.reserve(owner, "other-peer", cfInput{}, time.Now(), &helper); code != 403 {
 		t.Fatal("other peer authorized helper")
 	}
-	a, code := g.reserve(owner, "owner-peer", "", time.Now(), &helper)
+	a, code := g.reserve(owner, "owner-peer", cfInput{}, time.Now(), &helper)
 	if code != 200 {
 		t.Fatal("four screen slots blocked attached helper")
 	}
 	a.ready = true
 	a.operation.Unlock()
-	if _, code = g.reserve(owner, "owner-peer", "", time.Now(), &helper); code != 409 {
+	if _, code = g.reserve(owner, "owner-peer", cfInput{}, time.Now(), &helper); code != 409 {
 		t.Fatal("duplicate helper")
 	}
-	if _, code = g.reserve(owner, "owner-peer", a.handle, time.Now(), nil); code != 404 {
+	if _, code = g.reserve(owner, "owner-peer", cfInput{Publication: a.handle}, time.Now(), nil); code != 404 {
 		t.Fatal("self subscription")
 	}
 	viewer := roomAccess{ref: "shared", user: "viewer"}
-	if _, code = g.reserve(viewer, "viewer", "", time.Now(), nil); code != 409 {
+	if _, code = g.reserve(viewer, "viewer", cfInput{}, time.Now(), nil); code != 409 {
 		t.Fatal("fifth publisher")
 	}
-	rx, code := g.reserve(viewer, "viewer", a.handle, time.Now(), nil)
+	rx, code := g.reserve(viewer, "viewer", cfInput{Publication: a.handle}, time.Now(), nil)
 	if code != 200 || !rx.audio {
 		t.Fatal("viewer did not receive screen audio")
 	}
 	rx.operation.Unlock()
 	viewer.ref = "different"
-	if _, code = g.reserve(viewer, "viewer", a.handle, time.Now(), nil); code != 404 {
+	if _, code = g.reserve(viewer, "viewer", cfInput{Publication: a.handle}, time.Now(), nil); code != 404 {
 		t.Fatal("cross-room audio")
 	}
 	g.mu.Lock()
@@ -388,5 +388,59 @@ func TestCloudflareNativeOfferPermissions(t *testing.T) {
 	defer f.a.nativeMu.Unlock()
 	if !f.a.nativeSessions[credentials["session"].(string)].Revoked {
 		t.Fatal("departure left the helper lease active")
+	}
+}
+
+func TestBrowserDisplayAudioFollowsOwnedScreen(t *testing.T) {
+	media := &fakeMedia{}
+	f := newCFFixture(t, "https://player.test", media)
+	type peer struct {
+		cookie *http.Cookie
+		id     string
+	}
+	join := func(user string) peer {
+		c := f.login(t, user)
+		_, joined := f.post(t, c, "tab", f.ref, "join", cfInput{})
+		return peer{c, joined["identity"].(string)}
+	}
+	alice, bob := join("33"), join("34")
+	post := func(p peer, op string, in cfInput, want int) map[string]any {
+		t.Helper()
+		code, body := f.post(t, p.cookie, p.id, f.ref, op, in)
+		if code != want {
+			t.Fatalf("%s returned %d, want %d", op, code, want)
+		}
+		return body
+	}
+	const base = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n"
+	video := base + "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:0\r\na=sendonly\r\n"
+	audio := base + "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2\r\na=mid:0\r\na=sendonly\r\n"
+	screen := post(alice, "publish", cfInput{Mid: "0", SDP: video}, 200)["handle"].(string)
+	offer := cfInput{Mid: "0", Screen: screen, SDP: audio}
+	post(alice, "publish", offer, 404) // Parent still negotiating.
+	post(alice, "ready", cfInput{Handle: screen}, 200)
+	post(bob, "publish", offer, 404)
+	post(alice, "publish", cfInput{Mid: "0", SDP: audio}, 400)
+	post(alice, "publish", cfInput{Mid: "0", Screen: screen, SDP: video}, 400)
+	post(alice, "publish", cfInput{Mid: "0", Screen: screen, SDP: strings.Replace(audio, "opus/48000/2", "PCMU/8000", 1)}, 400)
+	handle := post(alice, "publish", offer, 200)["handle"].(string)
+	post(alice, "publish", offer, 409)
+	state := func() map[string]any { return post(bob, "state", cfInput{}, 200)["audio"].(map[string]any) }
+	if len(state()) != 0 {
+		t.Fatal("audio advertised before ready")
+	}
+	post(alice, "ready", cfInput{Handle: handle}, 200)
+	if sound := state(); len(sound) != 1 || sound[screen] != handle {
+		t.Fatal("viewer missing screen-bound audio")
+	}
+	sub := post(bob, "subscribe", cfInput{Publication: handle}, 200)["handle"].(string)
+	post(bob, "answer", cfInput{Handle: sub, SDP: strings.Replace(audio, "sendonly", "recvonly", 1)}, 200)
+	post(alice, "close", cfInput{Handle: screen}, 200)
+	if len(state()) != 0 {
+		t.Fatal("audio survived its parent screen")
+	}
+	f.a.sweepCloudflare(t.Context(), false)
+	if media.closed != 3 {
+		t.Fatalf("closed %d of three mock SFU sessions", media.closed)
 	}
 }

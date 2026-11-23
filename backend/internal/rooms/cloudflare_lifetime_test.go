@@ -90,16 +90,24 @@ func TestFixedRoomLifetime(t *testing.T) {
 	}
 }
 
-func TestPilotRequiresBothIdentityAndCurrentVoice(t *testing.T) {
+func TestVoiceMembershipGrantsViewingAndPilotListControlsPublishing(t *testing.T) {
 	f := newCFFixture(t, "https://player.test", &fakeMedia{})
 	f.cfg.PilotUsers = map[string]bool{"33": true}
 	other := f.login(t, "34")
-	if code, _ := f.post(t, other, "other", f.ref, "join", cfInput{}); code != 403 {
-		t.Fatal("correct channel alone admitted non-tester")
+	code, watch := f.post(t, other, "other", f.ref, "join", cfInput{})
+	if code != 200 || watch["canPublish"] != false {
+		t.Fatal("voice member did not get watch-only access")
+	}
+	viewer := watch["identity"].(string)
+	if code, _ := f.post(t, other, viewer, f.ref, "publish", cfInput{}); code != 403 {
+		t.Fatal("viewer permitted to publish")
+	}
+	if code, _ := f.post(t, other, viewer, f.ref, "state", cfInput{}); code != 200 {
+		t.Fatal("viewer lost room access")
 	}
 	tester := f.login(t, "33")
 	code, joined := f.post(t, tester, "tab", f.ref, "join", cfInput{})
-	if code != 200 {
+	if code != 200 || joined["canPublish"] != true {
 		t.Fatal("tester in correct channel denied")
 	}
 	f.voice(t, "33", "23")
@@ -195,7 +203,12 @@ func TestFreshNavigationRequiresFreshOAuth(t *testing.T) {
 	if !grant.HttpOnly || !grant.Secure || grant.MaxAge != 36000 || grant.SameSite != http.SameSiteStrictMode {
 		t.Fatal("unsafe room credential")
 	}
-	now = now.Add(4 * time.Hour)
+	now = now.Add(16 * time.Minute)
+	continued := join("old-tab", grant) // Browser has already discarded the five-minute OAuth cookie.
+	if continued.Code != 200 || continued.Result().Cookies()[0].MaxAge != 36000-16*60 {
+		t.Fatal("room credential did not survive 15 minutes with its original deadline")
+	}
+	now = now.Add(4*time.Hour - 16*time.Minute)
 	if join("new-tab", grant, login).Code != 401 {
 		t.Fatal("new visit reused the previous Discord login")
 	}

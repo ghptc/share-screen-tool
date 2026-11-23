@@ -21,7 +21,7 @@ func TestVoiceCommandRequiresFreshChannel(t *testing.T) {
 		t.Fatal("stale Gateway accepted")
 	}
 	g.Observe(&dg.Event{Sequence: 3, Struct: &dg.VoiceStateUpdate{VoiceState: &dg.VoiceState{GuildID: "11", UserID: "33"}}})
-	if _, ok := g.Lookup("11", "33", time.Now()); ok {
+	if p, known := g.Lookup("11", "33", time.Now()); !known || p.Channel != "" {
 		t.Fatal("departure ignored")
 	}
 	if g.Observe(&dg.Event{Sequence: 5}) {

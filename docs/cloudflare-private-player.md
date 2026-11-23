@@ -1,10 +1,12 @@
 # Screen Share private player and Discord OAuth
 
-The Worker serves the compiled player and sends allowed OAuth and signaling requests over one host-and-port VPC Service binding. The single Linux controller owns the ten-hour sessions, four screen slots, SFU credential and durable track journal. Its separate bot holds the Gateway credential. Private admission requires both a listed tester identity and current membership of the mapped voice channel. The default Worker config has no public route, preview URL or backend binding.
+The Worker serves the compiled player and sends allowed OAuth and signaling requests over one host-and-port VPC Service binding. The single Linux controller owns the ten-hour sessions, four screen slots, SFU credential and durable track journal. Its separate bot holds the Gateway credential. Discord OAuth identifies the viewer and the bot verifies membership in the mapped voice channel. The pilot list grants screen publishing permission. The default Worker config has no public route, preview URL or backend binding.
 
 **Public release is blocked.** The two-hour proposal has been superseded by fixed 36,000-second admissions with manual re-entry. Voice departures are checked during signaling and reconciliation. A total controller/watchdog outage or a persistent SFU control API outage can leave live media flowing beyond the authorization deadline. The private pilot does not resolve that limitation. Complete real-guild and hosted-route acceptance before considering wider access. [Established-media measurements](cloudflare-sfu.md)
 
 The running Screen Share hostname uses Discord admission without a Cloudflare Access login. The [original migration procedure](screen-share-migration.md) describes the earlier Access-protected handover. For a player-only update, use the versioned rollout below.
+
+The participant strip includes signed-in viewers in this room. Multiple tabs for one Discord identity appear once. The strip uses the name and static avatar verified at login. An abruptly disconnected browser ages out after 75 seconds without a state request. A temporary voice-authority outage suspends media. The same tab can resume watching when the bot proves the original voice membership again, up to the original ten-hour deadline. A confirmed departure or changed membership epoch ends that admission.
 
 ## 1. Build and check locally
 
@@ -30,7 +32,7 @@ Use a protected editor for the two systemd environment files. Enter one assignme
 | --- | --- |
 | Shared origin file (`~/.config/screen-share/player.env`) | `APP_ORIGIN=https://screen-share-player.gabrielhpittacosta.workers.dev`. Both replacement units load this last. |
 | Both protected role files | `DISCORD_CHANNELS` (guild/voice pairs), `DISCORD_ROOM_KEY`, `DISCORD_VOICE_KEY`. Use the same mapping and voice key on both sides. Each key must contain at least 32 characters. |
-| `controller.env` only | `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`, `DISCORD_PILOT_USERS` (comma-separated Discord user IDs, no wildcards), `CLOUDFLARE_SFU_APP_ID`, `CLOUDFLARE_SFU_APP_SECRET`. Optional `DISCORD_DENIED_USERS` takes precedence. |
+| `controller.env` only | `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`, `DISCORD_PILOT_USERS` (permitted publishers, comma-separated Discord user IDs, no wildcards), `CLOUDFLARE_SFU_APP_ID`, `CLOUDFLARE_SFU_APP_SECRET`. Optional `DISCORD_DENIED_USERS` takes precedence. |
 | `bot.env` only | `DISCORD_BOT_TOKEN`. |
 | `tunnel.token` only | Plain connector token for the dedicated remotely managed tunnel. |
 
@@ -47,11 +49,17 @@ Use the deployed hostname for this check. A localhost client-authentication pref
 To use the outcome-only Firefox recorder for the deployed site, supply its private `/live` link as `SCREEN_SHARE_TEST_ROOM_URL` and run `node frontend/smoke/private-guild.mjs` from the repository root. This uses the browser's normal HTTPS trust store. The recorder checks the callback, admission, departure and wrong-channel re-entry.
 
 1. Give a named tester in the configured voice channel the link from the real `/live` command. Complete Discord OAuth. Expect a successful callback, a 200 room join and a connected player. With zero publishers the expected heading is **No active screens**.
-2. Copy the link into a separate profile. Confirm a signed-out visitor encounters Discord authentication. With a signed-in pilot tester in the wrong channel, expect a 403 on the room join. A member outside the tester list also receives a denial.
+2. Copy the link into a separate profile. Confirm a signed-out visitor encounters Discord authentication. With a signed-in pilot tester in the wrong channel, expect a 403 on the room join. An authenticated member in the mapped channel who is outside the publisher list can watch.
 3. Leave or switch voice channels with the admitted player open. Verify the player loses access and the old session cannot obtain state. Reopen the same link while outside the channel and verify denial again. Record the time and outcome only. Avoid HAR exports and OAuth callback URLs.
 4. For a video-only check, use two eligible testers, disable sharing audio, publish an approved screen and verify remote video stops on departure.
 
-### Hosted application audio
+### Windows Chrome audio acceptance
+
+1. Join the hosted room with a Windows 11 Chrome publisher and a second viewer. Keep the viewer muted. On the publisher, enable **Share audio**, choose **Share my screen**, select a Chrome tab and enable tab audio in the picker. The publisher should see **Sharing tab audio**. If the viewer shows **Enable audio**, click it with the tab muted. Open **Audio** and check that the shared screen has audio controls. For a source with existing audio activity, verify increasing inbound audio RTP packets in the viewer’s `chrome://webrtc-internals`.
+2. Stop sharing and repeat with a **Window**, then **Entire Screen**. Use the audio option Chrome offers for that selection. System audio can include other apps and notifications. Window audio availability and scope depend on the picker. [Chrome screen capture controls](https://developer.chrome.com/docs/web-platform/screen-sharing-controls) · [Chrome window audio options](https://developer.chrome.com/release-notes/141#windowaudio_for_getdisplaymedia)
+3. Keep **Share audio** enabled in the player and deselect audio in the picker. Video should continue with a visible **Video only** explanation. Stopping the screen should remove its audio controls on the viewer. Starting a new share should require a fresh audio opt-in.
+
+### Linux native application audio
 
 With **Share audio** enabled and the screen publication ready, the publisher can open **Audio → Pair native audio helper**. An explicit click creates a screen-bound session. The player reveals a single-use pairing code after its owner watch receives the first heartbeat. Use the installed Linux helper on the publishing workstation to list eligible applications and select the intended application's serial. Supply pairing JSON over standard input through a hidden prompt. Codes expire after one minute. The helper claims the code at the same HTTPS origin and renews a ten-second lease against the authorized Discord session and screen. Closing the Audio panel keeps the watch alive. Stopping the screen or disabling audio ends it.
 

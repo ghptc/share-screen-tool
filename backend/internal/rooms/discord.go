@@ -24,13 +24,16 @@ import (
 const discordTTL = 45 * time.Second
 
 type roomAccess struct {
-	mediaRequests                   *rate.Limiter
-	controlHash                     [32]byte
-	session, ref, user, epoch, name string
-	entry                           string // idempotency key for one browser navigation
-	until                           time.Time
-	publishing                      bool
-	started                         time.Time
+	proofMu                             *sync.Mutex
+	mediaRequests                       *rate.Limiter
+	controlHash                         [32]byte
+	session, ref, user, epoch, name     string
+	displayName, avatar, participantKey string
+	lastSeen, voiceChecked              time.Time
+	entry                               string // idempotency key for one browser navigation
+	until                               time.Time
+	publishing                          bool
+	started                             time.Time
 }
 type channelAccess struct {
 	c        *discord.Config
@@ -90,15 +93,19 @@ func (a *API) RegisterDiscord(m *http.ServeMux, c *discord.Config) {
 		})
 	}
 }
-func (d *channelAccess) epoch(ctx context.Context, ref, user string) string {
+func (d *channelAccess) canPublish(user string) bool {
+	return d.c.PilotUsers == nil || d.c.PilotUsers[user]
+}
+
+func (d *channelAccess) epoch(ctx context.Context, ref, user string) (string, int) {
 	ch, ok := d.c.Dir.Lookup(ref)
-	if !ok || d.c.Blocked[user] || (d.c.PilotUsers != nil && !d.c.PilotUsers[user]) {
-		return ""
+	if !ok || d.c.Blocked[user] {
+		return "", http.StatusForbidden
 	}
 	body, _ := json.Marshal(map[string]string{"Guild": ch.Guild, "User": user})
 	req, err := http.NewRequestWithContext(ctx, "POST", d.c.VoiceURL+"/voice", bytes.NewReader(body))
 	if err != nil {
-		return ""
+		return "", http.StatusServiceUnavailable
 	}
 	// This POST is a read. If an idle connection closes, Go can retry on a
 	// fresh connection within the same timeout and still require a live proof.
@@ -107,14 +114,20 @@ func (d *channelAccess) epoch(ctx context.Context, ref, user string) string {
 	req.Header.Set("Content-Type", "application/json")
 	res, err := d.client.Do(req)
 	if err != nil {
-		return ""
+		return "", http.StatusServiceUnavailable
 	}
 	defer res.Body.Close()
 	var p discord.Presence
-	if res.StatusCode != 200 || json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&p) != nil || p.Channel != ch.Voice {
-		return ""
+	if res.StatusCode == http.StatusNoContent {
+		return "", http.StatusForbidden
 	}
-	return p.Epoch
+	if res.StatusCode != 200 || json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&p) != nil || p.Epoch == "" || p.Channel == "" {
+		return "", http.StatusServiceUnavailable
+	}
+	if p.Channel != ch.Voice {
+		return "", http.StatusForbidden
+	}
+	return p.Epoch, http.StatusOK
 }
 func (a *API) discordJoin(w http.ResponseWriter, r *http.Request) {
 	d := a.discord
@@ -147,9 +160,28 @@ func (a *API) discordJoin(w http.ResponseWriter, r *http.Request) {
 		fail(w, 401, "Discord sign-in required")
 		return
 	}
-	epoch := d.epoch(r.Context(), ref, s.User)
-	if epoch == "" {
-		fail(w, 403, "Connect to this Discord voice channel to watch")
+	if a.prototype != nil && s.Epoch != "" {
+		d.mu.Lock()
+		var peer string
+		for id, b := range d.active {
+			if b.session == s.ID && b.ref == ref && b.entry == entry {
+				peer = id
+				break
+			}
+		}
+		d.mu.Unlock()
+		if peer != "" {
+			if _, status := a.checkDiscord(r.Context(), "dc-"+ref, peer); status != 200 {
+				fail(w, status, "Discord voice authorization required")
+				return
+			}
+			a.cfJoined(w, s, peer, a.prototype.controlFor(peer))
+			return
+		}
+	}
+	epoch, status := d.epoch(r.Context(), ref, s.User)
+	if status != 200 {
+		fail(w, status, "Connect to this Discord voice channel to watch")
 		return
 	}
 	if a.prototype != nil {
@@ -166,6 +198,11 @@ func (a *API) discordJoin(w http.ResponseWriter, r *http.Request) {
 	room := "dc-" + ref
 	d.mu.Lock()
 	if a.prototype != nil {
+		if _, valid := d.oauth.Session(s.ID); !valid {
+			d.mu.Unlock()
+			fail(w, 403, "Room authorization ended")
+			return
+		}
 		for peer, previous := range d.active {
 			if previous.session == s.ID && previous.ref == ref && previous.entry == entry {
 				d.mu.Unlock()
@@ -179,10 +216,13 @@ func (a *API) discordJoin(w http.ResponseWriter, r *http.Request) {
 		fail(w, 429, "Room session limit reached")
 		return
 	}
-	access := roomAccess{controlHash: sha256.Sum256([]byte(control)), session: s.ID, ref: ref, user: s.User, epoch: epoch, name: "Screen " + randomID(3), until: s.Until}
+	access := roomAccess{proofMu: new(sync.Mutex), controlHash: sha256.Sum256([]byte(control)), session: s.ID, ref: ref, user: s.User, epoch: epoch, name: "Screen " + randomID(3), until: s.Until}
 	if a.prototype != nil {
 		access.mediaRequests = rate.NewLimiter(5, 20)
 		access.entry = entry
+		access.displayName, access.avatar = s.DisplayName, s.Avatar
+		access.participantKey = a.prototype.controlFor("roster:" + ref + ":" + s.User)
+		access.lastSeen, access.voiceChecked = a.now(), a.now()
 	}
 	d.active[identity] = access
 	d.mu.Unlock()
@@ -198,7 +238,7 @@ func (a *API) discordJoin(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) cfJoined(w http.ResponseWriter, s discord.Session, id, control string) {
 	a.discord.oauth.WriteRoomCookie(w, s)
-	write(w, 200, map[string]any{"transport": "cloudflare-prototype", "identity": id, "nativeAudioControl": control, "expiresAt": s.Until, "serverTime": a.now()})
+	write(w, 200, map[string]any{"transport": "cloudflare-prototype", "canPublish": a.discord.canPublish(s.User), "identity": id, "nativeAudioControl": control, "expiresAt": s.Until, "serverTime": a.now()})
 }
 
 // Browsers authenticate the signaling socket with the application session. The
@@ -279,71 +319,124 @@ func (a *API) discordToken(room, id string, b roomAccess) (string, error) {
 	return auth.NewAccessToken(a.cfg.APIKey, a.cfg.APISecret).SetIdentity(id).SetName(b.name).SetVideoGrant(grant).SetValidFor(discordTTL).ToJWT()
 }
 func (a *API) validDiscord(ctx context.Context, room, id string) (roomAccess, bool) {
+	b, status := a.checkDiscord(ctx, room, id)
+	return b, status == http.StatusOK
+}
+
+func (a *API) checkDiscord(ctx context.Context, room, id string) (roomAccess, int) {
 	d := a.discord
 	if d == nil {
-		return roomAccess{}, false
+		return roomAccess{}, 403
 	}
 	d.mu.Lock()
 	b, ok := d.active[id]
 	d.mu.Unlock()
 	if !ok || room != "dc-"+b.ref {
-		return roomAccess{}, false
+		return roomAccess{}, 403
 	}
-	_, sessionOK := d.oauth.Session(b.session)
-	expired := func() bool { return a.prototype != nil && !a.now().Before(b.until) }
-	if !sessionOK || expired() || d.epoch(ctx, b.ref, b.user) != b.epoch || expired() {
-		// A canceled client request has no authority to revoke another socket.
-		// Deny this request. The independent SFU and API monitors keep checking.
-		if sessionOK && !expired() && ctx.Err() != nil {
-			return roomAccess{}, false
-		}
-		d.mu.Lock()
-		_, registered := d.active[id]
-		delete(d.active, id)
-		d.mu.Unlock()
-		if registered {
-			d.oauth.Revoke(b.session)
 
-			a.nativeMu.Lock()
-			delete(a.nativeOwners, b.controlHash)
-			var helpers []string
-			for sid, s := range a.nativeSessions {
-				if s.Owner.Identity == id && s.Owner.Room == room && !s.Revoked {
-					helpers = append(helpers, sid)
-				}
-			}
-			a.nativeMu.Unlock()
-			if g := a.prototype; g != nil {
-				g.mu.Lock()
-				g.changedLocked()
-				for _, track := range g.tracks {
-					if track.owner == id {
-						g.retireLocked(track)
-					}
-				}
-				g.mu.Unlock()
-				for _, sid := range helpers {
-					a.revokeNative(sid)
-				}
-				return roomAccess{}, false
-			}
-			go func() {
-				for _, sid := range helpers {
-					a.revokeNative(sid)
-				}
-				c, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-				defer cancel()
-				if admin, err := a.nativeContext(c, room); err == nil {
-					_, _ = a.client.RemoveParticipant(admin, &livekit.RoomParticipantIdentity{Room: room, Identity: id})
-				}
-			}()
+	// Serialize proofs for this peer so a delayed reply cannot restore stale access.
+	b.proofMu.Lock()
+	defer b.proofMu.Unlock()
+	status := http.StatusForbidden
+	confirmedDeparture := false
+	if _, ok := d.oauth.Session(b.session); ok {
+		epoch, proof := d.epoch(ctx, b.ref, b.user)
+		status = proof
+		if proof == 200 && epoch != b.epoch {
+			status = 403
 		}
-		return roomAccess{}, false
+		confirmedDeparture = status == 403
+		if !a.now().Before(b.until) {
+			status = 403
+		}
+		if ctx.Err() != nil && a.now().Before(b.until) && proof == 503 {
+			return roomAccess{}, 503
+		}
 	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	current, ok := d.active[id]
-	return current, ok
+	b, ok = d.active[id]
+	if !ok {
+		d.mu.Unlock()
+		return roomAccess{}, 403
+	}
+	if status == 200 {
+		if a.prototype != nil {
+			b.voiceChecked = a.now()
+			d.active[id] = b
+		}
+		d.mu.Unlock()
+		return b, 200
+	}
+
+	// An unavailable authority denies all media, but the fixed admission can
+	// recover if a later proof still carries the original membership epoch.
+	suspended := status == 503 && a.prototype != nil
+	affected := map[string]roomAccess{id: b}
+	if suspended {
+		if b.voiceChecked.IsZero() {
+			d.mu.Unlock()
+			return roomAccess{}, 503
+		}
+		b.voiceChecked = time.Time{}
+		d.active[id] = b
+	} else {
+		if confirmedDeparture && a.prototype != nil {
+			// All tabs admitted under this membership lost it together.
+			for peer, other := range d.active {
+				if other.ref == b.ref && other.user == b.user && other.epoch == b.epoch {
+					affected[peer] = other
+				}
+			}
+		}
+		for peer, grant := range affected {
+			delete(d.active, peer)
+			d.oauth.Revoke(grant.session)
+		}
+	}
+	d.mu.Unlock()
+	for peer, grant := range affected {
+		a.endDiscordMedia(room, peer, grant, suspended)
+	}
+	return roomAccess{}, status
+}
+
+func (a *API) endDiscordMedia(room, id string, b roomAccess, suspended bool) {
+	a.nativeMu.Lock()
+	if !suspended {
+		delete(a.nativeOwners, b.controlHash)
+	}
+	var helpers []string
+	for sid, s := range a.nativeSessions {
+		if s.Owner.Identity == id && s.Owner.Room == room && !s.Revoked {
+			helpers = append(helpers, sid)
+		}
+	}
+	a.nativeMu.Unlock()
+	if g := a.prototype; g != nil {
+		g.mu.Lock()
+		g.changedLocked()
+		for _, track := range g.tracks {
+			if track.owner == id {
+				g.retireLocked(track)
+			}
+		}
+		g.mu.Unlock()
+		for _, sid := range helpers {
+			a.revokeNative(sid)
+		}
+	} else {
+		go func() {
+			for _, sid := range helpers {
+				a.revokeNative(sid)
+			}
+			c, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			defer cancel()
+			if admin, err := a.nativeContext(c, room); err == nil {
+				_, _ = a.client.RemoveParticipant(admin, &livekit.RoomParticipantIdentity{Room: room, Identity: id})
+			}
+		}()
+	}
 }
 func (a *API) discordPublish(w http.ResponseWriter, r *http.Request) {
 	d := a.discord

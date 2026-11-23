@@ -41,7 +41,7 @@ async function localSDP(pc: RTCPeerConnection, description: RTCSessionDescriptio
   return pc.localDescription!.sdp
 }
 
-// The screen peer has one send-only video transceiver. Count RTP candidates from
+// Each publication has one send-only transceiver. Count RTP candidates from
 // its browser-generated offer, including host candidates represented by mDNS.
 function candidateTypes(sdp: string) {
   const types = new Set<string>()
@@ -103,6 +103,13 @@ export async function publish(
     direction: 'sendonly',
     ...(encoding && { sendEncodings: [encoding] }),
   })
+  if (track.kind === 'audio') {
+    const opus = RTCRtpSender.getCapabilities('audio')?.codecs.filter(
+      codec => codec.mimeType.toLowerCase() === 'audio/opus' && codec.clockRate === 48000 && codec.channels === 2,
+    )
+    if (!opus?.length) throw new Error('Opus screen audio unavailable')
+    tx.setCodecPreferences(opus)
+  }
   const sdp = await screenOfferSDP(pc, cancel)
   cancel?.throwIfAborted()
   if (track.readyState !== 'live' || pc.connectionState === 'closed' || pc.connectionState === 'failed')

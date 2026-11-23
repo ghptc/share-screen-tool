@@ -124,7 +124,7 @@ export function localPlayer(): Plugin {
               path: path.slice('/player'.length),
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              timeout: 14000,
+              timeout: 48000,
             },
             (response) => {
               res.statusCode = response.statusCode || 502

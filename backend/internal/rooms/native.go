@@ -18,7 +18,7 @@ type nativeOwner struct {
 }
 type nativeSession struct {
 	Owner                      nativeOwner
-	ID, Screen                 string
+	ID, Screen, Phase          string
 	CodeHash, LeaseHash        [32]byte
 	Expires                    time.Time
 	Claimed, Revoked, Watching bool
@@ -59,7 +59,17 @@ func (a *API) watchOwner(w http.ResponseWriter, r *http.Request) {
 		if err := controller.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
 			return
 		}
-		if _, err := w.Write([]byte("active\n")); err != nil {
+		a.nativeMu.Lock()
+		phase := s.Phase
+		active := a.nativeSessions[id] == s && !s.Revoked && a.now().Before(s.Expires)
+		a.nativeMu.Unlock()
+		if !active {
+			return
+		}
+		if phase == "" {
+			phase = "active" // Pairing and older helpers.
+		}
+		if _, err := w.Write([]byte(phase + "\n")); err != nil {
 			return
 		}
 		if err := controller.Flush(); err != nil {
@@ -69,12 +79,6 @@ func (a *API) watchOwner(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-ticker.C:
-			a.nativeMu.Lock()
-			active := a.nativeSessions[id] == s && !s.Revoked
-			a.nativeMu.Unlock()
-			if !active {
-				return
-			}
 		}
 	}
 }
@@ -218,11 +222,14 @@ func (a *API) claimNative(w http.ResponseWriter, r *http.Request) {
 	}
 	write(w, 200, map[string]any{"session": found.ID, "lease": lease, "token": token, "serverUrl": a.cfg.WSURL})
 }
+
+var nativePhaseRank = map[string]int{"": 0, "starting": 1, "waiting": 2, "ready": 3, "sharing": 4}
+
 func (a *API) leaseNative(w http.ResponseWriter, r *http.Request) {
 	a.nativeMu.Lock()
 	s := a.nativeSessions[r.PathValue("session")]
 	var copy nativeSession
-	ok := s != nil && !s.Revoked && s.Claimed && s.LeaseHash == bearerHash(r) && a.now().Before(s.Expires)
+	ok := s != nil && !s.Revoked && s.Watching && s.Claimed && s.LeaseHash == bearerHash(r) && a.now().Before(s.Expires)
 	if ok {
 		copy = *s
 	}
@@ -231,12 +238,25 @@ func (a *API) leaseNative(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, "Native audio session ended")
 		return
 	}
+	var update struct{ Phase string }
+	if r.ContentLength != 0 && !decode(w, r, &update) {
+		return
+	}
+	// Empty phase preserves v5 heartbeats. Ignore an older in-flight phase
+	// arriving after the first-write acknowledgement.
+	if _, ok := nativePhaseRank[update.Phase]; !ok {
+		fail(w, 400, "Unknown native audio phase")
+		return
+	}
 	a.nativeMu.Lock()
 	s = a.nativeSessions[copy.ID]
-	if s == nil || s.Revoked {
+	if s == nil || s.Revoked || !s.Watching || !s.Claimed || s.LeaseHash != copy.LeaseHash || !a.now().Before(s.Expires) || !a.now().Before(s.Owner.Expires) {
 		a.nativeMu.Unlock()
 		fail(w, 403, "Native audio session ended")
 		return
+	}
+	if nativePhaseRank[update.Phase] > nativePhaseRank[s.Phase] {
+		s.Phase = update.Phase
 	}
 	s.Expires = a.now().Add(10 * time.Second)
 	a.nativeMu.Unlock()

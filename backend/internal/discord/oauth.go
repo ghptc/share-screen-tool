@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -18,9 +20,9 @@ import (
 
 type OAuthConfig struct{ Origin, ClientID, Secret, AuthorizeURL, TokenURL, UserURL string }
 type Session struct {
-	ID, User           string
-	Room, Epoch, Entry string // Cloudflare room admission, pinned once per OAuth login.
-	Until              time.Time
+	ID, User, DisplayName, Avatar string
+	Room, Epoch, Entry            string // Cloudflare room admission, pinned once per OAuth login.
+	Until                         time.Time
 }
 type transaction struct {
 	state, verifier, ref string
@@ -131,17 +133,50 @@ func (o *OAuth) begin(w http.ResponseWriter, r *http.Request) {
 	cookie(w, "login", browser, 300, http.SameSiteLaxMode)
 	http.Redirect(w, r, o.cfg.AuthorizeURL+"?"+params.Encode(), http.StatusSeeOther)
 }
-func (o *OAuth) identity(ctx context.Context, code, verifier string) (string, error) {
+
+type discordUser struct {
+	ID, Username, Avatar string
+	GlobalName           string `json:"global_name"`
+}
+
+var avatarHash = regexp.MustCompile(`^(a_)?[0-9a-f]{32}$`)
+
+// Fetch a small static image once. The Discord user ID and CDN path stay private.
+func (o *OAuth) avatar(ctx context.Context, user discordUser) string {
+	if !avatarHash.MatchString(user.Avatar) {
+		return ""
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://cdn.discordapp.com/avatars/"+user.ID+"/"+user.Avatar+".png?size=32", nil)
+	if err != nil {
+		return ""
+	}
+	res, err := o.http.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		return ""
+	}
+	const limit = 8192
+	data, err := io.ReadAll(io.LimitReader(res.Body, limit+1))
+	if err != nil || len(data) > limit || !bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")) {
+		return ""
+	}
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(data)
+}
+
+func (o *OAuth) identity(ctx context.Context, code, verifier string) (discordUser, error) {
 	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {o.cfg.Origin + "/api/discord/callback"}, "code_verifier": {verifier}}
 	req, err := http.NewRequestWithContext(ctx, "POST", o.cfg.TokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", err
+		return discordUser{}, err
 	}
 	req.SetBasicAuth(o.cfg.ClientID, o.cfg.Secret)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	res, err := o.http.Do(req)
 	if err != nil {
-		return "", err
+		return discordUser{}, err
 	}
 	defer res.Body.Close()
 	var t struct {
@@ -149,23 +184,23 @@ func (o *OAuth) identity(ctx context.Context, code, verifier string) (string, er
 		Type  string `json:"token_type"`
 	}
 	if res.StatusCode != 200 || json.NewDecoder(io.LimitReader(res.Body, 32768)).Decode(&t) != nil || t.Token == "" || !strings.EqualFold(t.Type, "bearer") {
-		return "", errors.New("authorization exchange failed")
+		return discordUser{}, errors.New("authorization exchange failed")
 	}
 	req, err = http.NewRequestWithContext(ctx, "GET", o.cfg.UserURL, nil)
 	if err != nil {
-		return "", err
+		return discordUser{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+t.Token)
 	res, err = o.http.Do(req)
 	if err != nil {
-		return "", err
+		return discordUser{}, err
 	}
 	defer res.Body.Close()
-	var user struct{ ID string }
+	var user discordUser
 	if res.StatusCode != 200 || json.NewDecoder(io.LimitReader(res.Body, 32768)).Decode(&user) != nil || !snowflake.MatchString(user.ID) {
-		return "", errors.New("identity unavailable")
+		return discordUser{}, errors.New("identity unavailable")
 	}
-	return user.ID, nil
+	return user, nil
 }
 func (o *OAuth) callback(w http.ResponseWriter, r *http.Request) {
 	private(w)
@@ -189,6 +224,17 @@ func (o *OAuth) callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Discord login unavailable", 403)
 		return
 	}
+	name := user.GlobalName
+	if name == "" {
+		name = user.Username
+	}
+	if name == "" {
+		name = "Discord member"
+	}
+	var avatar string
+	if o.roomLogin {
+		avatar = o.avatar(r.Context(), user)
+	}
 	id := rand.Text() + rand.Text()
 	now := o.now()
 	o.mu.Lock()
@@ -202,7 +248,7 @@ func (o *OAuth) callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Login busy", 429)
 		return
 	}
-	session := Session{ID: id, User: user, Until: now.Add(time.Hour)}
+	session := Session{ID: id, User: user.ID, DisplayName: name, Avatar: avatar, Until: now.Add(time.Hour)}
 	if o.roomLogin {
 		session.Room = v.ref
 		session.Until = now.Add(5 * time.Minute)

@@ -166,7 +166,7 @@ func TestFreshVoiceLookupAfterReusedConnectionCloses(t *testing.T) {
 	ref, _ := dir.Reference(discord.Channel{Guild: "11", Voice: "22"})
 	d := channelAccess{c: &discord.Config{Dir: dir, VoiceURL: authority.URL}, client: authority.Client()}
 	for i := 0; i < 2; i++ {
-		if got := d.epoch(t.Context(), ref, "33"); got != "active" {
+		if got, status := d.epoch(t.Context(), ref, "33"); got != "active" || status != 200 {
 			t.Fatal("fresh authority did not verify membership after an idle connection closed")
 		}
 	}

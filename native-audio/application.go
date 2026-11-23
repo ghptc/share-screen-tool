@@ -141,21 +141,21 @@ type applicationTap struct {
 	captureSerial      uint64
 	captureID          uint64
 	verifiedLinkStates [2]string // FL, FR in the last accepted snapshot
+	verifiedIdle       bool
+	route              [2]channelLink
 }
+
+type channelLink struct{ output, input, link, serial uint64 }
 
 // Only these observations can be retried during initial link verification.
 type pendingLinks struct {
 	detail           string
 	idleSourceAtInit bool
+	exact            bool
+	stdout           io.Reader
 }
 
 func (p pendingLinks) Error() string { return p.detail }
-
-// WirePlumber resolves target.object by serial and creates both links. Observe
-// the actual ports before handing any PCM to the encoder.
-func (tap *applicationTap) waitForLinks(ctx context.Context, recorderStdout io.Reader) error {
-	return pollStereoLinks(ctx, recorderStdout, tap.verify)
-}
 
 func pollStereoLinks(ctx context.Context, recorderStdout io.Reader, verify func(context.Context) error) error {
 	wait, cancel := context.WithTimeoutCause(ctx, linkVerificationTimeout, errLinkTimeout)
@@ -178,6 +178,9 @@ func pollStereoLinks(ctx context.Context, recorderStdout io.Reader, verify func(
 		if last.detail != "" && (errors.Is(err, errLinkTimeout) || errors.Is(err, errDumpTimeout)) {
 			err = fmt.Errorf("%w; last completed graph: %s", err, last)
 			// TIOCINQ observes the kernel queue without consuming recorder output.
+			if last.stdout != nil {
+				recorderStdout = last.stdout
+			}
 			if queued := pendingPCM(recorderStdout); queued != nil {
 				err = fmt.Errorf("%w; recorder stdout queued bytes at timeout=%d", err, *queued)
 				if idleAtDeadline && *queued == 0 {
@@ -187,14 +190,6 @@ func pollStereoLinks(ctx context.Context, recorderStdout io.Reader, verify func(
 		}
 		return err
 	}
-}
-
-func (tap *applicationTap) verify(ctx context.Context) error {
-	graph, err := readGraph(ctx)
-	if err != nil {
-		return err
-	}
-	return tap.verifyGraph(graph)
 }
 
 func (tap *applicationTap) verifyGraph(graph []graphObject) error {
@@ -235,6 +230,7 @@ func (tap *applicationTap) verifyGraph(graph []graphObject) error {
 	}
 	inputs, portErr := stereoPorts(graph, tap.captureID, "input")
 	states := [2]string{"missing", "missing"}
+	var route [2]channelLink
 	for _, link := range graph {
 		if !strings.HasSuffix(link.Type, ":Link") || link.Info.InputNode != tap.captureID {
 			continue
@@ -255,12 +251,16 @@ func (tap *applicationTap) verifyGraph(graph []graphObject) error {
 		if link.Info.OutputPort != outputs[i] || link.Info.InputPort != inputs[i] || states[i] != "missing" {
 			return errors.New("unexpected or duplicate channel entered application capture")
 		}
+		route[i] = channelLink{outputs[i], inputs[i], link.ID, propID(link.Info.Props["object.serial"])}
 		switch link.Info.State {
 		case "unlinked", "init", "negotiating", "allocating", "paused", "active":
 			states[i] = link.Info.State
 		default:
 			states[i] = "unknown"
 		}
+	}
+	if tap.route != [2]channelLink{} && tap.route != route {
+		return errors.New("selected stereo route disappeared or changed")
 	}
 	if portErr != nil {
 		return pendingLinks{detail: "capture " + portErr.Error()}
@@ -269,18 +269,28 @@ func (tap *applicationTap) verifyGraph(graph []graphObject) error {
 		return pendingLinks{detail: "capture ports have no incoming links"}
 	}
 	if states == [2]string{"init", "init"} {
+		tap.route = route
 		return pendingLinks{
 			detail: fmt.Sprintf("stereo link states (FL=init, FR=init); source=%s, recorder=%s, source pulse.corked=%s",
 				publicNodeState(source.Info.State), publicNodeState(recorder.Info.State), pulseCorked(source.Info.Props["pulse.corked"])),
 			idleSourceAtInit: source.Info.State == "idle" && recorder.Info.State == "suspended",
+			exact:            true,
+		}
+	}
+	exact := true
+	for _, state := range states {
+		if state == "missing" || state == "unlinked" || state == "unknown" {
+			exact = false
 		}
 	}
 	for _, state := range states {
 		if state != "active" && state != "paused" {
-			return pendingLinks{detail: fmt.Sprintf("stereo link states (FL=%s, FR=%s)", states[0], states[1])}
+			return pendingLinks{detail: fmt.Sprintf("stereo link states (FL=%s, FR=%s)", states[0], states[1]), exact: exact}
 		}
 	}
+	tap.verifiedIdle = source.Info.State == "idle"
 	tap.verifiedLinkStates = states
+	tap.route = route
 	return nil
 }
 

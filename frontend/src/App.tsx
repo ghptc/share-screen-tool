@@ -9,7 +9,7 @@ import './player.css'
 
 function Player({ channel }: {channel?: string}) {
   const [session, setSession] = useState<{ room: Room; credentials: JoinResult } | null>(null)
-  const [prototypePeer, setPrototypePeer] = useState<{identity: string; control: string} | null>(null)
+  const [prototypePeer, setPrototypePeer] = useState<{identity: string; control: string; canPublish: boolean} | null>(null)
   const [state, setState] = useState('Connecting')
   const [error, setError] = useState('')
   const expireCurrent = useRef<() => void>(() => {})
@@ -97,7 +97,7 @@ function Player({ channel }: {channel?: string}) {
           entry = granted
           if (checkDeadline()) return
           expiryTimer = window.setTimeout(expire, granted.deadline - Date.now())
-          setPrototypePeer({identity:credentials.identity,control:credentials.nativeAudioControl ?? ''})
+          setPrototypePeer({identity:credentials.identity,control:credentials.nativeAudioControl ?? '',canPublish:credentials.canPublish === true})
           setState('Connected')
           return
         }
@@ -120,12 +120,15 @@ function Player({ channel }: {channel?: string}) {
       }
     }
     setState('Connecting')
-    window.addEventListener('pageshow', checkDeadline)
+    function restore(event: PageTransitionEvent) {
+      if (!checkDeadline() && event.persisted) setAttempt(value => value + 1)
+    }
+    window.addEventListener('pageshow', restore)
     document.addEventListener('visibilitychange', checkDeadline)
     void Promise.resolve().then(join)
     return () => {
       controller.abort()
-      window.removeEventListener('pageshow', checkDeadline)
+      window.removeEventListener('pageshow', restore)
       document.removeEventListener('visibilitychange', checkDeadline)
       window.clearTimeout(timer)
       window.clearTimeout(expiryTimer)
@@ -146,6 +149,7 @@ function Player({ channel }: {channel?: string}) {
           channel={channel}
           identity={prototypePeer.identity}
           control={prototypePeer.control}
+          canPublish={prototypePeer.canPublish}
           onExpired={() => expireCurrent.current()}
           onDenied={() => {
             setPrototypePeer(null)
