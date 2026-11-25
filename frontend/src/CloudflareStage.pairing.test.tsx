@@ -173,11 +173,11 @@ it.each(['user stop', 'screen ended', 'audio disabled', 'authorization lost', 'p
   expect(p.paths.filter(path => path === desktop + '/start')).toHaveLength(1)
 })
 
-it('offers a user gesture after remote autoplay denial without pairing a viewer', async () => {
+it.each(['NotAllowedError', 'NotSupportedError'])('distinguishes remote playback failures (%s)', async error => {
   vi.stubGlobal('RTCPeerConnection', FakePeer)
   vi.stubGlobal('MediaStream', class { getTracks() { return [] } })
   const play = vi.spyOn(HTMLMediaElement.prototype, 'play')
-    .mockRejectedValueOnce(new DOMException('Blocked', 'NotAllowedError')).mockResolvedValue(undefined)
+    .mockRejectedValueOnce(new DOMException('Playback failed', error)).mockResolvedValue(undefined)
   vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
   vi.mocked(subscribe).mockImplementation(async (_peer, publication, received) => {
     received({ kind: publication === 'game' ? 'audio' : 'video' } as MediaStreamTrack)
@@ -189,13 +189,61 @@ it('offers a user gesture after remote autoplay denial without pairing a viewer'
     return Response.json({ publications: ['screen'], audio: { screen: 'game' }, owned: [] })
   })
   render(<CloudflareStage canPublish={false} channel="test" identity="viewer" control="viewer" onExpired={vi.fn()} onDenied={vi.fn()} />)
-  const enable = await screen.findByRole('button', { name: 'Enable audio' })
-  expect(play).toHaveBeenCalledTimes(1)
-  fireEvent.click(enable)
-  expect(play).toHaveBeenCalledTimes(2)
   fireEvent.click(screen.getByRole('button', { name: 'Audio' }))
+  const volume = await screen.findByRole('slider')
+  expect(volume).toBeEnabled()
+  if (error === 'NotAllowedError') {
+    const enable = await screen.findByRole('button', { name: 'Enable audio' })
+    expect(play).toHaveBeenCalledTimes(1)
+    fireEvent.click(enable)
+    expect(play).toHaveBeenCalledTimes(2)
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Enable audio' })).toBeNull())
+  } else {
+    expect(await screen.findByText('Audio unavailable. Playback failed.')).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Enable audio' })).toBeNull()
+  }
   expect(screen.queryByRole('button', { name: 'Pair native audio helper' })).toBeNull()
   expect(paths).toEqual(['/api/discord/test/media/state'])
+})
+
+it('renders independent audio before video ontrack and without publisher metadata', async () => {
+  vi.useFakeTimers()
+  vi.stubGlobal('RTCPeerConnection', FakePeer)
+  vi.stubGlobal('MediaStream', class { getTracks() { return [] } })
+  vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+  vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
+  let videoArrives!: (track: MediaStreamTrack) => void
+  const video = { kind: 'video', readyState: 'live' } as MediaStreamTrack
+  vi.mocked(subscribe).mockImplementation(async (_peer, publication, receive) => {
+    if (publication === 'screen') videoArrives = receive
+    else if (publication === 'sound') receive({ kind: 'audio', readyState: 'live' } as MediaStreamTrack)
+    else if (publication === 'unreachable-audio') throw Error('Subscription failed')
+    else receive(video)
+    return publication
+  })
+  const fetch = vi.fn().mockResolvedValueOnce(Response.json({
+    publications: ['screen', 'silent', 'retrying'], audio: { screen: 'sound', retrying: 'unreachable-audio' }, owned: [],
+  })).mockResolvedValueOnce(Response.json({ publications: [], owned: [], audio: { screen: 'sound' },
+    publishers: { screen: 'p1' }, participants: [{ key: 'p1', name: 'Alice', sharing: true }] }))
+  vi.stubGlobal('fetch', fetch)
+  render(<CloudflareStage canPublish={false} channel="test" identity="viewer" control="" onExpired={vi.fn()} onDenied={vi.fn()} />)
+  await act(() => vi.advanceTimersByTimeAsync(0))
+  fireEvent.click(screen.getByRole('button', { name: 'Audio' }))
+  expect(screen.getByText(/Video only\. No audio published/)).toBeVisible()
+  expect(screen.getByText(/Audio unavailable\. Retrying subscription/)).toBeVisible()
+  const slider = screen.getByRole('slider', { name: 'Screen 1 audio volume' })
+  const audio = screen.getByLabelText<HTMLAudioElement>('Screen 1 audio playback')
+  const stream = audio.srcObject
+  fireEvent.change(slider, { target: { value: '31' } })
+  expect(audio.volume).toBe(.31)
+  act(() => videoArrives(video))
+  expect(screen.getByLabelText('Screen 1 audio playback')).toBe(audio)
+  expect(audio.srcObject).toBe(stream)
+  expect(fetch).toHaveBeenCalledTimes(1)
+  await act(() => vi.advanceTimersByTimeAsync(2500))
+  expect(screen.getByLabelText('Alice audio playback')).toBe(audio)
+  expect(screen.getByRole('slider', { name: 'Alice audio volume' })).toHaveValue('31')
+  expect(audio.volume).toBe(.31)
 })
 
 it('keeps the local mix per publisher through focus, ended audio and a new screen handle', async () => {
@@ -227,10 +275,16 @@ it('keeps the local mix per publisher through focus, ended audio and a new scree
   const playback = (name: string) => screen.getByLabelText<HTMLAudioElement>(name + ' audio playback')
   const slider = (name: string) => screen.getByRole('slider', { name: name + ' audio volume' })
   expect(playback('Alice').volume).toBe(1)
+  const firstVideo = document.querySelector('video')!
+  const originalSource = firstVideo.srcObject
+  const bobVideo = document.querySelectorAll('video')[1]
+  const bobSource = bobVideo.srcObject
   fireEvent.change(slider('Alice'), { target: { value: '24' } })
   fireEvent.click(screen.getByRole('button', { name: 'Mute Alice audio' }))
   fireEvent.change(slider('Bob'), { target: { value: '0' } })
   fireEvent.click(screen.getByRole('button', { name: 'Focus screen 2' }))
+  expect(document.querySelector('video')).toBe(firstVideo)
+  expect(firstVideo.srcObject).toBe(originalSource)
   expect(playback('Alice').volume).toBe(.24)
   expect(playback('Alice').muted).toBe(true)
   expect(playback('Bob').volume).toBe(0)
@@ -240,6 +294,8 @@ it('keeps the local mix per publisher through focus, ended audio and a new scree
   expect(screen.queryByLabelText('Alice audio volume')).toBeNull()
   await act(() => vi.advanceTimersByTimeAsync(2500))
   await act(() => vi.advanceTimersByTimeAsync(2500))
+  expect(document.querySelector('video')).toBe(bobVideo)
+  expect(bobVideo.srcObject).toBe(bobSource)
   expect(slider('Alice')).toHaveAttribute('aria-valuetext', '24%')
   expect(playback('Alice').volume).toBe(.24)
   expect(playback('Alice').muted).toBe(true)

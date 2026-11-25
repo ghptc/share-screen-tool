@@ -264,8 +264,9 @@ func (a *API) leaseNative(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		for _, t := range g.tracks {
 			if t.helper == copy.ID && !t.closing {
-				if strings.HasSuffix(r.URL.Path, "/ready") {
+				if !t.ready && strings.HasSuffix(r.URL.Path, "/ready") {
 					t.ready = true
+					g.changedLocked()
 				}
 				t.seen = a.now()
 			}

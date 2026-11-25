@@ -37,12 +37,14 @@ async function waitForGathering(pc: RTCPeerConnection, cancel?: AbortSignal) {
 
 async function localSDP(pc: RTCPeerConnection, description: RTCSessionDescriptionInit) {
   await pc.setLocalDescription(description)
-  if (!await waitForGathering(pc)) throw new Error('ICE gathering timed out')
-  return pc.localDescription!.sdp
+  const complete = await waitForGathering(pc)
+  const answer = pc.localDescription
+  if (answer?.type !== 'answer' || (!complete && !candidateTypes(answer.sdp).size))
+    throw new Error('No usable ICE answer')
+  return answer.sdp
 }
 
-// Each publication has one send-only transceiver. Count RTP candidates from
-// its browser-generated offer, including host candidates represented by mDNS.
+// Count RTP candidates in the browser's current SDP, including mDNS host candidates.
 function candidateTypes(sdp: string) {
   const types = new Set<string>()
   for (const line of sdp.split(/\r?\n/)) {

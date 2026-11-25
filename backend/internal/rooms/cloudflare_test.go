@@ -380,6 +380,22 @@ func TestCloudflareNativeOfferPermissions(t *testing.T) {
 	if publish("other", audio) != 403 || publish(lease, video) != 400 || publish(lease, strings.Replace(audio, "opus/48000/2", "PCMU/8000", 1)) != 400 || publish(lease, audio) != 200 {
 		t.Fatal("incorrect native offer restrictions")
 	}
+	g := f.a.prototype
+	g.mu.Lock()
+	changed := g.change
+	g.mu.Unlock()
+	if status, _ := call(t, controller.URL, path+"/ready", lease, struct{}{}); status != 200 {
+		t.Fatal("native audio readiness rejected")
+	}
+	select {
+	case <-changed:
+	default:
+		t.Fatal("ready native audio did not wake room state watchers")
+	}
+	_, state := f.post(t, other, viewer["identity"].(string), f.ref, "state", cfInput{})
+	if state["audio"].(map[string]any)[handle] == nil {
+		t.Fatal("ready native audio missing from its parent screen")
+	}
 	f.voice(t, "33", "23")
 	if publish(lease, audio) != 403 {
 		t.Fatal("withdrawn voice membership authorized helper")

@@ -4,8 +4,8 @@ import CloudflareStage from './CloudflareStage'
 
 const opus = { mimeType: 'audio/opus', clockRate: 48000, channels: 2 }
 
-function publisher(surface: string, returnsAudio: boolean, audioStatus = 200) {
-  const video = { kind: 'video', readyState: 'live', getSettings: () => ({ displaySurface: surface }), stop: vi.fn() }
+function publisher(surface: string, returnsAudio: boolean, audioStatus = 200, connectedAtAnswer = false) {
+  const video = { kind: 'video', readyState: 'live', contentHint: '', getSettings: () => ({ displaySurface: surface }), stop: vi.fn() }
   const audio = { kind: 'audio', readyState: 'live', stop: vi.fn(), onended: () => {} }
   const capture = vi.fn().mockResolvedValue({
     getVideoTracks: () => [video], getAudioTracks: () => returnsAudio ? [audio] : [],
@@ -26,13 +26,13 @@ function publisher(surface: string, returnsAudio: boolean, audioStatus = 200) {
     onconnectionstatechange = () => {}
     setCodecPreferences = vi.fn()
     constructor() { super(); peers.push(this) }
-    addTransceiver(track: MediaStreamTrack) { this.track = track; return this }
+    addTransceiver = vi.fn((track: MediaStreamTrack, _init: RTCRtpTransceiverInit) => { this.track = track; return this })
     getSenders() { return [] }
     async createOffer() {
       return { type: 'offer', sdp: 'm=' + this.track!.kind + ' 9 UDP/TLS/RTP/SAVPF 111\r\na=candidate:test 1 UDP 1 local.test 5000 typ host\r\n' }
     }
     async setLocalDescription(description: RTCSessionDescriptionInit) { this.localDescription = description }
-    async setRemoteDescription() {}
+    async setRemoteDescription() { if (connectedAtAnswer) this.connectionState = 'connected' }
     close = vi.fn()
     connect() { this.connectionState = 'connected'; this.onconnectionstatechange() }
   }
@@ -77,6 +77,25 @@ function publisher(surface: string, returnsAudio: boolean, audioStatus = 200) {
 }
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+
+it.each([60, 30, 15])('sets the %i FPS sender ceiling on the initial video offer', async fps => {
+  const p = publisher('monitor', false)
+  fireEvent.click(screen.getByRole('button', { name: 'Quality' }))
+  fireEvent.change(screen.getByLabelText('Publish FPS'), { target: { value: String(fps) } })
+  await p.start(false)
+  expect(p.video.contentHint).toBe('motion')
+  expect(p.peers[0].addTransceiver).toHaveBeenCalledWith(p.video,
+    { direction: 'sendonly', sendEncodings: [{ maxFramerate: fps }] })
+})
+
+it('announces already-connected video and audio once across later connection notifications', async () => {
+  const p = publisher('browser', true, 200, true)
+  await p.start(true)
+  await screen.findByText('Sharing tab audio.')
+  await act(async () => { p.peers[0].connect(); p.peers[1].connect() })
+  expect(p.requests.filter(r => r.op === 'ready').map(r => r.handle)).toEqual(['video', 'display-sound'])
+  expect(p.requests.filter(r => r.op === 'publish')).toHaveLength(2)
+})
 
 it.each([
   ['browser', /enable tab audio/i], ['window', /no window audio/i], ['monitor', /enable system audio for Entire Screen/i],

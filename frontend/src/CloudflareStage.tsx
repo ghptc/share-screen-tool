@@ -5,11 +5,14 @@ import HostedAudio from './HostedAudio'
 import { readAudioPreference, writeAudioPreference } from './gameAudioSession'
 import { applyVideoTarget, nativeTarget, type VideoTarget } from './videoQuality'
 import PublishQuality from './PublishQuality'
+import CloudflareDiagnostics from './CloudflareDiagnostics'
 
 type Flow = {
   audioFor?: string
   displayAudio?: MediaStreamTrack
   ready?: boolean
+  announcing?: boolean
+  negotiated?: boolean
   pc: RTCPeerConnection
   handle?: string
   stream?: MediaStream
@@ -17,11 +20,13 @@ type Flow = {
   timeout?: ReturnType<typeof setTimeout>
 }
 type Participant = { key: string; name: string; avatar?: string; sharing: boolean }
-type Tile = { key: string; stream: MediaStream; audioFor?: string }
+type MediaFlow = { key: string; stream?: MediaStream; audioFor?: string; pc?: RTCPeerConnection; retrying?: boolean }
+type Subscription = { audioFor?: string; retryDelay: number; timer?: ReturnType<typeof setTimeout> }
 type Mix = { volume: number; muted: boolean }
 const defaultMix: Mix = { volume: 100, muted: false }
 const local = 'local'
 const localAudio = 'local-audio'
+const initialSubscriptionRetry = 1000
 
 function missingAudio(surface?: string) {
   if (surface === 'browser') return 'Video only. Share again and enable tab audio in the browser picker.'
@@ -61,6 +66,7 @@ function RemoteAudio({
   label,
   screen,
   mix,
+  unavailable,
   onMix,
   onBlocked,
 }: {
@@ -68,40 +74,53 @@ function RemoteAudio({
   label: string
   screen: string
   mix: Mix
+  unavailable: string
   onMix: (mix: Mix) => void
-  onBlocked: (screen: string, blocked: boolean) => void
+  onBlocked: (screen: string, retry?: () => void) => void
 }) {
   const element = useRef<HTMLAudioElement>(null)
   const { volume, muted } = mix
+  const [failure, setFailure] = useState('')
+  const play = useCallback(function playStream() {
+    const audio = element.current
+    if (!audio || !stream || audio.srcObject !== stream || audio.muted) return
+    void audio.play().then(() => {
+      if (audio.srcObject === stream) {
+        setFailure('')
+        onBlocked(screen)
+      }
+    }).catch(error => {
+      if (audio.srcObject !== stream || audio.muted) return
+      const blocked = error?.name === 'NotAllowedError'
+      setFailure(blocked ? 'Playback blocked. Choose Enable audio.' : 'Audio unavailable. Playback failed.')
+      onBlocked(screen, blocked ? playStream : undefined)
+    })
+  }, [stream, screen, onBlocked])
   useEffect(() => {
     if (element.current) element.current.volume = volume / 100
   }, [volume, stream])
   useEffect(() => {
     const audio = element.current
     if (!audio || !stream) return
-    let active = true
     audio.srcObject = stream
-    if (!audio.muted)
-      void audio.play().catch(() => {
-        if (active && !audio.muted) onBlocked(screen, true)
-      })
+    setFailure('')
+    play()
     return () => {
-      active = false
       audio.pause()
       audio.srcObject = null
-      onBlocked(screen, false)
+      onBlocked(screen)
     }
-  }, [stream, screen, onBlocked])
-  if (!stream) return null
+  }, [stream, screen, onBlocked, play])
+  if (!stream) return <p>{label} · {unavailable}</p>
   function toggle() {
     const audio = element.current
     if (!audio) return
     audio.muted = !muted
     onMix({ volume, muted: !muted })
-    if (audio.muted) onBlocked(screen, false)
-    else void audio.play().catch(() => {
-      if (element.current === audio && audio.srcObject === stream && !audio.muted) onBlocked(screen, true)
-    })
+    if (audio.muted) {
+      onBlocked(screen)
+      setFailure('')
+    } else play()
   }
   return (
     <div className="listener-mix">
@@ -109,10 +128,12 @@ function RemoteAudio({
         ref={element}
         aria-label={label + ' playback'}
         muted={muted}
-        onPlaying={() => onBlocked(screen, false)}
+        onPlaying={() => { setFailure(''); onBlocked(screen) }}
+        onError={() => { setFailure('Audio unavailable. Playback failed.'); onBlocked(screen) }}
       />
       <label>
         {label} <small aria-hidden="true">{volume}%</small>
+        {failure && <small role="status">{failure}</small>}
         <input
           type="range"
           aria-label={label + ' volume'}
@@ -145,11 +166,12 @@ export default function CloudflareStage({
   onExpired: () => void
   onDenied: () => void
 }) {
-  const [media, setMedia] = useState<Tile[]>([])
+  const [media, setMedia] = useState<MediaFlow[]>([])
   const [participants, setParticipants] = useState<Participant[]>([])
   const [publishers, setPublishers] = useState<Record<string, string>>({})
   const [mixes, setMixes] = useState<Record<string, Mix>>({})
-  const tiles = media.filter((t) => !t.audioFor)
+  const tiles = media.filter((t): t is MediaFlow & { stream: MediaStream } => !t.audioFor && !!t.stream)
+  const stage = useRef<HTMLDivElement>(null)
   const [screen, setScreen] = useState('')
   const windows = /^Win/i.test(navigator.platform)
   const [browserAudioStatus, setBrowserAudioStatus] = useState('')
@@ -160,21 +182,18 @@ export default function CloudflareStage({
   const pairNativeAudio = import.meta.env.VITE_NATIVE_AUDIO_MODE === 'pair' ||
     !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)
   const [audioStatus, setAudioStatus] = useState('')
-  const audioControls = useRef<HTMLDivElement>(null)
-  const [blocked, setBlocked] = useState<Set<string>>(() => new Set())
-  const reportBlocked = useCallback((screen: string, value: boolean) => {
+  const [blocked, setBlocked] = useState<Map<string, () => void>>(() => new Map())
+  const reportBlocked = useCallback((screen: string, retry?: () => void) => {
     setBlocked((previous) => {
-      if (previous.has(screen) === value) return previous
-      const next = new Set(previous)
-      if (value) next.add(screen)
+      if (previous.get(screen) === retry) return previous
+      const next = new Map(previous)
+      if (retry) next.set(screen, retry)
       else next.delete(screen)
       return next
     })
   }, [])
   function enableAudio() {
-    for (const audio of audioControls.current?.querySelectorAll('audio') ?? []) {
-      if (!audio.muted) void audio.play().catch(() => {})
-    }
+    for (const retry of blocked.values()) retry()
   }
   const [offer, setOffer] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -219,6 +238,8 @@ export default function CloudflareStage({
     let retryDelay = 2500
     let timer: ReturnType<typeof setTimeout>
     const flows = new Map<string, Flow>()
+    // An advertised publication can outlive a failed receiving peer.
+    const subscriptions = new Map<string, Subscription>()
     const endpoint = '/api/discord/' + channel + '/media/'
     async function request(op: string, input: Record<string, unknown>) {
       const response = await fetch(endpoint + op, {
@@ -249,17 +270,28 @@ export default function CloudflareStage({
     }
     function refresh() {
       if (!active) return
-      setMedia(
-        Array.from(flows).flatMap(([key, flow]) =>
-          flow.stream ? [{ key, stream: flow.stream, audioFor: flow.audioFor }] : [],
-        ),
-      )
+      const records: MediaFlow[] = []
+      for (const key of [local, localAudio, ...subscriptions.keys()]) {
+        const flow = flows.get(key)
+        const subscription = subscriptions.get(key)
+        if (flow || subscription) records.push({ key, pc: flow?.pc, stream: flow?.stream,
+          audioFor: flow?.audioFor ?? subscription?.audioFor, retrying: !flow })
+      }
+      setMedia(records)
       const own = flows.get(local)
       setScreen(own?.ready ? (own.handle ?? '') : '')
     }
-    function remove(key: string) {
+    function remove(key: string, retry = false) {
+      const subscription = subscriptions.get(key)
+      if (subscription) {
+        clearTimeout(subscription.timer)
+        if (retry) {
+          subscription.timer = setTimeout(() => void watch(key, subscription), subscription.retryDelay)
+          subscription.retryDelay = Math.min(12000, subscription.retryDelay * 2)
+        } else subscriptions.delete(key)
+      }
       const flow = flows.get(key)
-      if (!flow) return
+      if (!flow) { refresh(); return }
       flows.delete(key)
       flow.cancelPublication?.abort()
       if (key === localAudio) {
@@ -288,10 +320,15 @@ export default function CloudflareStage({
       clearTimeout(flow.timeout)
       flow.timeout = setTimeout(() => {
         if (flows.get(key) === flow) {
-          remove(key)
-          if (key !== localAudio) setMessage('Media connection timed out.')
+          remove(key, true)
+          if (key === local) setMessage('Media connection timed out.')
+          if (key === localAudio) setBrowserAudioStatus('Video only. Screen audio connection timed out.')
         }
       }, 12000)
+    }
+    function removeAll() {
+      for (const key of subscriptions.keys()) remove(key)
+      for (const key of flows.keys()) remove(key)
     }
     function dispose() {
       if (!active) return
@@ -303,13 +340,14 @@ export default function CloudflareStage({
       setScreen('')
       stateRequest.abort()
       clearTimeout(timer)
-      for (const key of flows.keys()) remove(key)
+      removeAll()
     }
     function attach(key: string, audioFor?: string) {
       const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }] })
       const flow: Flow = { pc, audioFor }
       flows.set(key, flow)
       const signal: Signal = async (op, input) => {
+        if (flows.get(key) !== flow) throw new Error('Sharing ended.')
         const result = await request(op, key === localAudio && op === 'publish' ? { ...input, screen: audioFor } : input)
         if (result.handle) flow.handle = result.handle
         if (!active || flows.get(key) !== flow) {
@@ -318,23 +356,27 @@ export default function CloudflareStage({
         }
         return result
       }
-      pc.onconnectionstatechange = () => {
+      function connectionChanged() {
         if (flows.get(key) !== flow) return
         if (pc.connectionState === 'failed') {
-          remove(key)
+          remove(key, true)
           if (key === local) setMessage('Media connection failed.')
+          if (key === localAudio) setBrowserAudioStatus('Video only. Screen audio connection failed.')
           return
         }
         if (pc.connectionState === 'connecting' || pc.connectionState === 'disconnected')
           waitForConnection(key, flow)
         else clearTimeout(flow.timeout)
-        if ((key === local || key === localAudio) && flow.handle && pc.connectionState === 'connected')
+        const subscription = subscriptions.get(key)
+        if (subscription && pc.connectionState === 'connected') subscription.retryDelay = initialSubscriptionRetry
+        if (flow.negotiated && !flow.ready && !flow.announcing && flow.handle && pc.connectionState === 'connected') {
+          flow.announcing = true
           void signal('ready', { handle: flow.handle })
             .then(() => {
-              const firstReady = !flow.ready
+              if (flows.get(key) !== flow) return
               flow.ready = true
               refresh()
-              if (firstReady && key === local && flow.displayAudio) void publishDisplayAudio(flow)
+              if (key === local && flow.displayAudio) void publishDisplayAudio(flow)
               if (key === localAudio) {
                 const surface = flows.get(local)?.stream?.getVideoTracks()[0]?.getSettings().displaySurface
                 setBrowserAudioStatus(surface === 'browser' ? 'Sharing tab audio.' :
@@ -342,19 +384,31 @@ export default function CloudflareStage({
               }
             })
             .catch(() => {
-              if (flows.get(key) === flow) remove(key)
+              if (flows.get(key) !== flow) return
+              remove(key)
+              if (key === localAudio) setBrowserAudioStatus('Video only. The controller could not mark screen audio ready.')
+              if (key === local) setMessage('The controller could not mark the screen ready.')
             })
+        }
       }
-      return { flow, signal }
+      pc.onconnectionstatechange = connectionChanged
+      function publicationAnswered() {
+        if (flows.get(key) !== flow) return
+        flow.negotiated = true
+        if (pc.connectionState === 'new') waitForConnection(key, flow)
+        else connectionChanged()
+      }
+      return { flow, signal, publicationAnswered }
     }
     async function publishDisplayAudio(parent: Flow) {
       const track = parent.displayAudio
       if (flows.get(local) !== parent || !track || track.readyState !== 'live' || !parent.handle || flows.has(localAudio)) return
       try {
-        const { flow, signal } = attach(localAudio, parent.handle)
+        const { flow, signal, publicationAnswered } = attach(localAudio, parent.handle)
         flow.cancelPublication = new AbortController()
+        refresh()
         await publish(flow.pc, track, signal, undefined, flow.cancelPublication.signal)
-        if (flows.get(localAudio) === flow && flow.pc.connectionState === 'new') waitForConnection(localAudio, flow)
+        publicationAnswered()
       } catch {
         if (flows.get(local) !== parent || parent.displayAudio?.readyState === 'ended') return
         if (flows.has(localAudio)) remove(localAudio)
@@ -366,7 +420,7 @@ export default function CloudflareStage({
       if (!active || !canPublish || flows.has(local)) return
       setBusy(true)
       setMessage('')
-      const { flow, signal } = attach(local)
+      const { flow, signal, publicationAnswered } = attach(local)
       try {
         const stream = await navigator.mediaDevices.getDisplayMedia({
           video: { frameRate: { ideal: nativeTarget.fps, max: nativeTarget.fps } },
@@ -393,26 +447,17 @@ export default function CloudflareStage({
             }
           } else if (withAudio) {
             setBrowserAudioStatus(missingAudio(track.getSettings().displaySurface))
-          }
+          } else setBrowserAudioStatus('Video only. Share audio was off.')
         }
         track.onended = () => {
           if (flows.get(local) === flow) remove(local)
         }
         flow.cancelPublication = new AbortController()
-        await publish(flow.pc, track, signal, undefined, flow.cancelPublication.signal)
+        if ('contentHint' in track) track.contentHint = 'motion'
+        await publish(flow.pc, track, signal, { maxFramerate: selectedQuality.current.fps }, flow.cancelPublication.signal)
         if (!active || flows.get(local) !== flow) return
-        if (flow.pc.connectionState === 'new') waitForConnection(local, flow)
+        publicationAnswered()
         sender.current = flow.pc.getSenders().find(s => s.track === track)
-        if (sender.current && selectedQuality.current.fps !== nativeTarget.fps) {
-          try {
-            await applyVideoTarget(sender.current, track.getSettings(), selectedQuality.current)
-          } catch {
-            if (flows.get(local) === flow) {
-              selectQuality(nativeTarget)
-              setMessage('This browser could not apply the selected frame rate.')
-            }
-          }
-        }
         refresh()
       } catch (e) {
         if (flows.get(local) === flow) {
@@ -428,28 +473,35 @@ export default function CloudflareStage({
       }
     }
     stop.current = () => remove(local)
-    async function watch(publication: string, audioFor?: string) {
-      const { flow, signal } = attach(publication, audioFor)
+    async function watch(publication: string, subscription: Subscription) {
+      const { audioFor } = subscription
+      let attempt: Flow | undefined
       try {
+        const { flow, signal } = attach(publication, audioFor)
+        attempt = flow
+        refresh()
         await subscribe(
           flow.pc,
           publication,
           (track) => {
             if (flows.get(publication) !== flow) return
-            if (audioFor && (track.kind !== 'audio' || track.readyState === 'ended')) return
+            if (track.kind !== (audioFor ? 'audio' : 'video') || track.readyState === 'ended') {
+              remove(publication, true)
+              return
+            }
             const stream = new MediaStream([track])
             flow.stream = stream
-            if (audioFor) {
-              track.onended = () => {
-                if (flows.get(publication)?.stream === stream) remove(publication)
-              }
+            track.onended = () => {
+              if (flows.get(publication)?.stream === stream) remove(publication, true)
             }
             refresh()
           },
           signal,
         )
+        if (flows.get(publication) === flow && flow.pc.connectionState === 'new') waitForConnection(publication, flow)
       } catch {
-        if (flows.get(publication) === flow) remove(publication)
+        if (subscriptions.get(publication) === subscription && flows.get(publication) === attempt)
+          remove(publication, true)
       }
     }
     async function poll() {
@@ -464,26 +516,42 @@ export default function CloudflareStage({
         if (stateVersion) delay = 0
         if (!active) return
         setParticipants(state.participants ?? [])
-        setPublishers(state.publishers ?? {})
+        const owners: Record<string, string> = state.publishers ?? {}
+        const screens = [...new Set<string>([...state.publications, ...Object.keys(state.audio ?? {})])]
+        setPublishers(previous => Object.fromEntries(screens.map(key => [key, owners[key] || previous[key] || key])))
+        // A listener may have adjusted the screen before its owner was identified.
+        setMixes(previous => {
+          const resolved = Object.entries(owners).filter(([key, owner]) => owner && key !== owner && previous[key])
+          if (!resolved.length) return previous
+          const next = { ...previous }
+          for (const [key, owner] of resolved) {
+            next[owner] = previous[key]
+            delete next[key]
+          }
+          return next
+        })
         setMessage(value => value === 'Media connection interrupted.' ? '' : value)
-        const audio = Object.entries(state.audio ?? {}) as [string, string][]
-        const list: string[] = [...state.publications, ...audio.map(([, handle]) => handle)]
+        const advertised = new Map<string, string | undefined>()
+        for (const key of state.publications) advertised.set(key, undefined)
+        for (const [screen, handle] of Object.entries<string>(state.audio ?? {})) advertised.set(handle, screen)
+        for (const key of subscriptions.keys())
+          if (!advertised.has(key)) remove(key)
         for (const [key, flow] of flows) {
-          if (
-            (key !== local && key !== localAudio && !list.includes(key)) ||
-            (flow.handle && handles.includes(flow.handle) && !state.owned.includes(flow.handle))
-          )
-            remove(key)
+          if (flow.handle && handles.includes(flow.handle) && !state.owned.includes(flow.handle)) remove(key)
         }
-        for (const key of list)
-          if (!flows.has(key)) void watch(key, audio.find(([, handle]) => handle === key)?.[0])
+        for (const [key, audioFor] of advertised) {
+          if (subscriptions.has(key)) continue
+          const subscription = { audioFor, retryDelay: initialSubscriptionRetry }
+          subscriptions.set(key, subscription)
+          void watch(key, subscription)
+        }
       } catch {
         if (active) {
           setParticipants([])
           stateVersion = undefined
           delay = retryDelay
           retryDelay = Math.min(60000, retryDelay * 2)
-          for (const key of flows.keys()) remove(key)
+          removeAll()
           setMessage('Media connection interrupted.')
         }
       } finally {
@@ -500,10 +568,18 @@ export default function CloudflareStage({
 
   const focused = tiles.length > 1 && tiles.some((t) => t.key === focus)
   const sharing = tiles.some((t) => t.key === local)
+  const remoteScreens = [...new Set(media.filter(m => m.key !== local && m.key !== localAudio).map(m => m.audioFor ?? m.key))]
+  function publisherLabel(key: string) {
+    const owner = publishers[key] || key
+    const name = participants.find(person => person.key === owner)?.name
+    const fallback = 'Screen ' + (remoteScreens.indexOf(key) + 1)
+    if (name && participants.some(person => person.key !== owner && person.name === name)) return `${name} (${fallback})`
+    return name || fallback
+  }
   const audioNotice = browserAudioStatus || (windows && audioEnabled && !sharing
     ? 'Choose audio in the browser picker. System audio can include other apps and notifications.' : '')
   return (<>
-    <div className="player-stage">
+    <div className="player-stage" ref={stage}>
       {tiles.length ? (
         <div
           className="player-grid"
@@ -529,7 +605,7 @@ export default function CloudflareStage({
         </div>
       ) : (
         <div className="player-empty">
-          <h2>No active screens</h2>
+          <h2>{remoteScreens.length ? 'Waiting for screen video' : 'No active screens'}</h2>
         </div>
       )}
       {(message || audioNotice) && (
@@ -539,10 +615,18 @@ export default function CloudflareStage({
       )}
       <div className="player-dock">
         {focused && <button onClick={() => setFocus('')}>Back to grid</button>}
-        <button aria-expanded={qualityOpen} onClick={() => setQualityOpen(!qualityOpen)}>Quality</button>
+        <button aria-expanded={qualityOpen} onClick={() => { setAudioOpen(false); setQualityOpen(!qualityOpen) }}>Quality</button>
         {qualityOpen && <div className="player-popover quality-menu" role="region" aria-label="Quality controls">
-          <PublishQuality value={quality} settings={sender.current?.track?.getSettings()}
+          <PublishQuality value={quality} settings={sender.current?.track?.getSettings?.()}
             busy={busy || qualityBusy} sharing={sharing} onChange={target => void changeQuality(target)} />
+          {media.map(m => {
+            if (!m.pc) return null
+            const own = m.key === local || m.key === localAudio
+            return <CloudflareDiagnostics key={m.key} pc={m.pc} local={own} audio={!!m.audioFor}
+              label={own ? 'Your screen' : publisherLabel(m.audioFor ?? m.key)}
+              stream={m.stream} root={stage} />
+          })}
+          {media.length > 0 && <small>{tiles.length} video tiles · {remoteScreens.length} remote screens</small>}
         </div>}
         {canPublish && <button
           className="share-action"
@@ -563,12 +647,11 @@ export default function CloudflareStage({
           />
           Share audio
         </label>}
-        <button aria-expanded={audioOpen} onClick={() => setAudioOpen(!audioOpen)}>
+        <button aria-expanded={audioOpen} onClick={() => { setQualityOpen(false); setAudioOpen(!audioOpen) }}>
           {screen && audioEnabled && offer && !audioOpen ? 'Allow audio' : 'Audio'}
         </button>
         {blocked.size > 0 && <button onClick={enableAudio}>Enable audio</button>}
         <div
-          ref={audioControls}
           className="player-popover"
           hidden={!audioOpen}
           role="region"
@@ -587,20 +670,18 @@ export default function CloudflareStage({
             />
           ))}
           {screen && audioEnabled && audioStatus && <small role="status">{audioStatus}</small>}
-          {tiles.map((tile, i) => {
-            if (tile.key === local) return null
-            const owner = publishers[tile.key] ?? tile.key
-            const name = participants.find(person => person.key === owner)?.name
-            const screenLabel = 'Screen ' + (i + 1)
-            const duplicateName = name && participants.some(person => person.key !== owner && person.name === name)
+          {remoteScreens.map(key => {
+            const audio = media.find(m => m.audioFor === key && m.key !== localAudio)
+            const owner = publishers[key] || key
             return (
               <RemoteAudio
-                key={tile.key}
-                screen={tile.key}
-                label={(duplicateName ? `${name} (${screenLabel})` : name || screenLabel) + ' audio'}
+                key={key}
+                screen={key}
+                label={publisherLabel(key) + ' audio'}
                 mix={mixes[owner] ?? defaultMix}
                 onMix={mix => setMixes(current => ({ ...current, [owner]: mix }))}
-                stream={media.find((t) => t.audioFor === tile.key)?.stream}
+                stream={audio?.stream}
+                unavailable={audio ? (audio.retrying ? 'Audio unavailable. Retrying subscription.' : 'Waiting for audio subscription.') : 'Video only. No audio published.'}
                 onBlocked={reportBlocked}
               />
             )

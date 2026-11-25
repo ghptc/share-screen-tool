@@ -130,6 +130,31 @@ it('removes the wait and all peer listeners immediately when the publication is 
   expect(vi.getTimerCount()).toBe(0)
 })
 
+it.each([
+  { name: 'a usable RTP candidate', candidates: host },
+  { name: 'no candidates', candidates: '' },
+])('checks the current receiver answer at the ICE deadline with $name', async ({ candidates }) => {
+  vi.useFakeTimers()
+  const peer = Object.assign(new EventTarget(), {
+    iceGatheringState: 'gathering', localDescription: { type: 'answer', sdp: 'a=recvonly\r\n' },
+    setRemoteDescription: vi.fn(), getTransceivers: () => [],
+    createAnswer() { return this.localDescription }, setLocalDescription: vi.fn(),
+  })
+  const send = vi.fn().mockResolvedValueOnce({ handle: 'receiver', sdp: 'offer' }).mockResolvedValueOnce({})
+  const result = subscribe(peer as unknown as RTCPeerConnection, 'screen', vi.fn(), send).catch(error => error)
+  await vi.advanceTimersByTimeAsync(7999)
+  expect(send).toHaveBeenCalledTimes(1)
+  peer.localDescription.sdp += candidates
+  await vi.advanceTimersByTimeAsync(1)
+  if (candidates) {
+    expect(await result).toBe('receiver')
+    expect(send).toHaveBeenNthCalledWith(2, 'answer', { handle: 'receiver', sdp: peer.localDescription.sdp })
+  } else {
+    expect(await result).toBeInstanceOf(Error)
+    expect(send).toHaveBeenCalledTimes(1)
+  }
+})
+
 it('subscribes to the advertised audio handle and answers with stereo Opus', async () => {
   const opus = { mimeType: 'audio/opus', clockRate: 48000, channels: 2 }
   vi.stubGlobal('RTCRtpReceiver', { getCapabilities: () => ({ codecs: [opus] }) })

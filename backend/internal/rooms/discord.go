@@ -230,6 +230,9 @@ func (a *API) discordJoin(w http.ResponseWriter, r *http.Request) {
 	a.nativeOwners[sha256.Sum256([]byte(control))] = nativeOwner{room, identity, s.Until}
 	a.nativeMu.Unlock()
 	if a.prototype != nil {
+		a.prototype.mu.Lock()
+		a.prototype.changedLocked()
+		a.prototype.mu.Unlock()
 		a.cfJoined(w, s, identity, control)
 		return
 	}

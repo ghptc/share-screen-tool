@@ -125,19 +125,7 @@ func TestRoomStateWaitRevocation(t *testing.T) {
 	input := cfInput{Version: snapshot["version"].(string), IdleWait: true}
 	result := make(chan int, 1)
 	go func() { code, _ := f.post(t, cookie, id, f.ref, "state", input); result <- code }()
-	for until := time.Now().Add(time.Second); ; {
-		g := f.a.prototype
-		g.mu.Lock()
-		waiting := g.waiting[id]
-		g.mu.Unlock()
-		if waiting {
-			break
-		}
-		if time.Now().After(until) {
-			t.Fatal("state request did not wait")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitForStatePoll(t, f.a.prototype, id)
 	if code, _ := f.post(t, cookie, id, f.ref, "state", input); code != 409 {
 		t.Fatal("second waiter admitted")
 	}
@@ -156,6 +144,84 @@ func TestRoomStateWaitRevocation(t *testing.T) {
 	f.voice(t, "33", "22")
 	if code, _ := f.post(t, cookie, id, f.ref, "state", cfInput{}); code != 401 {
 		t.Fatal("return to channel restored revoked login")
+	}
+}
+
+func waitForStatePoll(t *testing.T, g *cfRegistry, id string) {
+	t.Helper()
+	for until := time.Now().Add(time.Second); ; {
+		g.mu.Lock()
+		waiting := g.waiting[id]
+		g.mu.Unlock()
+		if waiting {
+			return
+		}
+		if time.Now().After(until) {
+			t.Fatal("state request did not wait")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestPendingViewerPollSeesJoinThenReadyPublication(t *testing.T) {
+	f := newCFFixture(t, "https://player.test", &fakeMedia{})
+	post := func(cookie *http.Cookie, peer, action string, input cfInput) map[string]any {
+		t.Helper()
+		code, body := f.post(t, cookie, peer, f.ref, action, input)
+		if code != 200 {
+			t.Fatalf("%s returned %d", action, code)
+		}
+		return body
+	}
+	viewer := f.login(t, "33")
+	id := post(viewer, "viewer-tab", "join", cfInput{})["identity"].(string)
+	publisher := f.login(t, "34")
+	nextChange := func(previous map[string]any, change func()) map[string]any {
+		t.Helper()
+		version := previous["version"].(string)
+		result := make(chan map[string]any, 1)
+		go func() {
+			code, body := f.post(t, viewer, id, f.ref, "state", cfInput{Version: version, IdleWait: true})
+			if code != 200 {
+				body = nil
+			}
+			result <- body
+		}()
+		waitForStatePoll(t, f.a.prototype, id)
+		change()
+		select {
+		case state := <-result:
+			if state == nil {
+				t.Fatal("long poll failed")
+			}
+			if state["version"] == version {
+				t.Fatal("visible change returned the old version")
+			}
+			return state
+		case <-time.After(time.Second): // Before the fallback reconciliation tick.
+			t.Fatal("room change did not wake the viewer")
+			return nil
+		}
+	}
+	empty := post(viewer, id, "state", cfInput{})
+	var peer string
+	joined := nextChange(empty, func() {
+		peer = post(publisher, "publisher-tab", "join", cfInput{})["identity"].(string)
+	})
+	if len(joined["participants"].([]any)) != 2 || len(joined["publications"].([]any)) != 0 {
+		t.Fatal("join did not advertise a watching participant")
+	}
+	handle := post(publisher, peer, "publish", cfInput{Mid: "0", SDP: rosterVideo})["handle"].(string)
+	if pending := post(viewer, id, "state", cfInput{}); pending["version"] != joined["version"] {
+		t.Fatal("unready reservation changed the viewer's revision")
+	}
+	ready := nextChange(joined, func() { post(publisher, peer, "ready", cfInput{Handle: handle}) })
+	if pubs := ready["publications"].([]any); len(pubs) != 1 || pubs[0] != handle {
+		t.Fatal("ready publication missing from viewer's long poll")
+	}
+	closed := nextChange(ready, func() { post(publisher, peer, "close", cfInput{Handle: handle}) })
+	if len(closed["publications"].([]any)) != 0 {
+		t.Fatal("stopped publication still visible")
 	}
 }
 

@@ -44,3 +44,32 @@ test('clamps late-packet corrections and preserves genuinely zero rates', () => 
   const now = sample({ id: 'in', type: 'inbound-rtp', mediaType: 'video', timestamp: 3000, bytesReceived: 1000, framesDecoded: 10, packetsReceived: 102, packetsLost: 2 })
   expect(measureMedia(now, before, false)).toMatchObject({ fps: 0, bitrateBps: 0, lossPercent: 0 })
 })
+
+test('separates a 60 FPS source, encoder throughput and transmitted frames under bandwidth adaptation', () => {
+  const source: Partial<MediaStat> = { type: 'media-source', id: 'capture', frames: 200 }
+  const outgoing: Partial<MediaStat> = { type: 'outbound-rtp', id: 'out', kind: 'video', mediaSourceId: 'capture',
+    framesEncoded: 110, framesSent: 100, bytesSent: 10000 }
+  const previous = sample(source, outgoing)
+  const now = sample({ ...source, timestamp: 3000, frames: 320 },
+    { ...outgoing, timestamp: 3000, framesEncoded: 170, framesSent: 150, bytesSent: 260000,
+      targetBitrate: 1100000, qualityLimitationReason: 'bandwidth' },
+    { id: 'feedback', type: 'remote-inbound-rtp', localId: 'out', jitter: .021 },
+    { id: 'transport', type: 'transport', selectedCandidatePairId: 'pair' },
+    { id: 'pair', type: 'candidate-pair', availableOutgoingBitrate: 1200000 })
+  expect(measureMedia(now, previous, true)).toMatchObject({ captureFps: 60, fps: 30, transportFps: 25,
+    jitterMs: 21, bitrateBps: 1000000, targetBps: 1100000, availableBps: 1200000, limitation: 'bandwidth' })
+})
+
+test.each([true, false])('measures audio RTP and energy independently of video or playback (sender %s)', local => {
+  const rtp: Partial<MediaStat> = local
+    ? { type: 'outbound-rtp', packetsSent: 5, bytesSent: 100, mediaSourceId: 'source' }
+    : { type: 'inbound-rtp', packetsReceived: 5, bytesReceived: 100, totalAudioEnergy: 0 }
+  const previous = sample({ ...rtp, kind: 'audio', id: 'sound' }, { id: 'source', type: 'media-source', totalAudioEnergy: 0 })
+  const current = sample({ ...rtp, kind: 'audio', id: 'sound', timestamp: 3000, codecId: 'opus',
+    packetsReceived: 105, packetsSent: 105, bytesReceived: 1100, bytesSent: 1100, totalAudioEnergy: .125 },
+    { id: 'source', type: 'media-source', timestamp: 3000, totalAudioEnergy: .25 },
+    { id: 'opus', type: 'codec', mimeType: 'audio/opus' })
+  expect(measureMedia(current, previous, local, 'audio')).toMatchObject({
+    packetsPerSecond: 50, bitrateBps: 4000, audioEnergyDelta: local ? .25 : .125, codec: 'audio/opus' })
+  expect(measureMedia(current, undefined, local, 'audio').packetsPerSecond).toBeUndefined()
+})
