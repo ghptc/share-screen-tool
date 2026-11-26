@@ -19,11 +19,16 @@ export async function applyVideoTarget(sender: RTCRtpSender, settings: MediaTrac
   const scale = target.height ? Math.min(settings.width!, settings.height!) / target.height : 1
   const ratios = original.get(sender) ?? layers.map(layer => layer.scaleResolutionDownBy ?? 1)
   original.set(sender, ratios)
+  let changed = false
   layers.forEach((layer, index) => {
-    layer.scaleResolutionDownBy = Math.max(1, (ratios[index] ?? 1) * scale)
-    layer.maxFramerate = target.fps
+    const ratio = Math.max(1, (ratios[index] ?? 1) * scale)
+    if ((layer.scaleResolutionDownBy ?? 1) !== ratio || layer.maxFramerate !== target.fps) {
+      layer.scaleResolutionDownBy = ratio
+      layer.maxFramerate = target.fps
+      changed = true
+    }
   })
-  await sender.setParameters(parameters)
+  if (changed) await sender.setParameters(parameters)
   if (target.content !== undefined && sender.track && 'contentHint' in sender.track)
     sender.track.contentHint = target.content
 }
@@ -37,20 +42,28 @@ export function observeScreenActivity(sender: RTCRtpSender) {
   let timer: ReturnType<typeof setTimeout>
   let previous: StatsSample | undefined
   let quietSamples = 0
+  let movingSamples = 0
   async function poll() {
     try {
       const sample = sampleReport(await sender.getStats())
       if (!active || !track || sender.track !== track) return
       const { captureFps, limitation } = measureMedia(sample, previous, true)
       previous = sample
-      // Two sparse intervals suppress single-sample oscillation. On movement
-      // or resource pressure immediately hand adaptation back to the browser.
+      // Classify measured input, even when the encoder cannot keep up. Separate
+      // entry and exit thresholds keep a borderline cadence from flipping profiles.
       const quiet = captureFps !== undefined && captureFps <= 3 && limitation === 'none'
       quietSamples = quiet ? quietSamples + 1 : 0
-      const hint = quietSamples >= 2 ? 'detail' : ''
+      movingSamples = captureFps !== undefined && captureFps >= 24 ? movingSamples + 1 : 0
+      let hint = track.contentHint
+      if (quietSamples >= 2) hint = 'detail'
+      else if (movingSamples >= 3) hint = 'motion'
+      else if (captureFps === undefined ||
+        (hint === 'detail' && (captureFps > 6 || limitation !== 'none')) ||
+        (hint === 'motion' && captureFps < 15)) hint = ''
       if (track.contentHint !== hint) track.contentHint = hint
     } catch {
       previous = undefined
+      movingSamples = 0
       quietSamples = 0
       if (active && track) track.contentHint = ''
     } finally {

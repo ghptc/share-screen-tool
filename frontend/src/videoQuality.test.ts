@@ -52,3 +52,39 @@ test('automatic content detection uses sustained sparse input and releases detai
     expect(track.contentHint).toBe('')
   } finally { stop(); vi.useRealTimers() }
 })
+
+test('a profile-only change leaves native sender layers and rate control alone', async () => {
+  const sender = { track: { contentHint: '' }, getParameters: () => ({ encodings: [{ maxFramerate: 60 }] }),
+    setParameters: vi.fn() }
+  await applyVideoTarget(sender as unknown as RTCRtpSender, {}, { ...nativeTarget, content: 'motion' })
+  expect(sender.track.contentHint).toBe('motion')
+  expect(sender.setParameters).not.toHaveBeenCalled()
+})
+
+test('sustained moving input selects motion despite CPU pressure and holds across borderline samples', async () => {
+  vi.useFakeTimers()
+  let frames = 0, time = 0, rate = 26
+  const track = { contentHint: '' }
+  const sender = { track, getStats: vi.fn(async () => {
+    frames += rate * 2
+    time += 2000
+    return new Map([
+      ['src', { id: 'src', type: 'media-source', frames, timestamp: time }],
+      ['out', { id: 'out', type: 'outbound-rtp', kind: 'video', mediaSourceId: 'src', timestamp: time,
+        framesEncoded: time / 200, qualityLimitationReason: 'cpu' }],
+    ])
+  }) }
+  const stop = observeScreenActivity(sender as unknown as RTCRtpSender)!
+  try {
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(track.contentHint).toBe('')
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(track.contentHint).toBe('motion')
+    rate = 19
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(track.contentHint).toBe('motion')
+    rate = 2
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(track.contentHint).toBe('')
+  } finally { stop(); vi.useRealTimers() }
+})

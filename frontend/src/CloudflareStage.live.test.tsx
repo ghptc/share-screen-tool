@@ -278,3 +278,43 @@ it('coalesces simultaneous unauthorized subscriptions into one same-entry renewa
   expect(videos().map(t => t.id).sort()).toEqual(['a', 'b'])
   expect(room.join).toHaveBeenCalledTimes(2)
 })
+
+it('suspends only hidden video presentation and retains both subscriptions through focus and fullscreen', async () => {
+  const room = await enterRoom()
+  const alice = { name: 'Alice', screen: 'a' }, bob = { name: 'Bob', screen: 'b' }
+  await room.state('sharing', alice, bob)
+  const [first, second] = document.querySelectorAll('video')
+  const streams = [first.srcObject, second.srcObject]
+  const stage = first.closest('.player-stage')!
+  const fullscreen = vi.fn().mockResolvedValue(undefined)
+  Object.defineProperty(stage, 'requestFullscreen', { value: fullscreen })
+  const pause = second.pause = vi.fn()
+  const resume = second.play = vi.fn().mockResolvedValue(undefined)
+  const firstPause = first.pause = vi.fn()
+  fireEvent.click(screen.getByRole('button', { name: 'Focus screen 1' }))
+  expect(pause).toHaveBeenCalledOnce()
+  expect(second.autoplay).toBe(false)
+  expect(firstPause).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Fullscreen' }))
+  expect(fullscreen).toHaveBeenCalledOnce()
+  await room.state('roster', alice, bob, { name: 'Observer' })
+  expect(pause).toHaveBeenCalledOnce()
+  fireEvent.click(screen.getByRole('button', { name: 'Back to grid' }))
+  expect(resume).toHaveBeenCalledOnce()
+  const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
+  Object.defineProperty(document, 'pictureInPictureElement', { configurable: true, value: second })
+  try {
+    act(() => document.dispatchEvent(new Event('visibilitychange')))
+    expect(firstPause).toHaveBeenCalledOnce()
+    expect(pause).toHaveBeenCalledOnce() // This video still has a visible PiP sink.
+  } finally { Reflect.deleteProperty(document, 'pictureInPictureElement') }
+  act(() => second.dispatchEvent(new Event('leavepictureinpicture')))
+  expect(pause).toHaveBeenCalledTimes(2)
+  hidden.mockReturnValue(false)
+  act(() => document.dispatchEvent(new Event('visibilitychange')))
+  expect([...document.querySelectorAll('video')]).toEqual([first, second])
+  expect([first.srcObject, second.srcObject]).toEqual(streams)
+  expect(room.subscribe.mock.calls).toEqual([['a'], ['b']])
+  expect(room.answer).toHaveBeenCalledTimes(2)
+  expect(room.owned.size).toBe(2)
+})

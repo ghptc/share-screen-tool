@@ -181,3 +181,21 @@ it('subscribes to the advertised audio handle and answers with stereo Opus', asy
     vi.unstubAllGlobals()
   }
 })
+
+it.each([true, false])('keeps one video encoding and all fallback profiles when codec preference is supported (%s)', async available => {
+  const { peer, send, track } = screenPeer()
+  peer.localDescription.sdp += host
+  peer.iceGatheringState = 'complete'
+  const codecs = ['VP8', 'rtx', 'H264', 'H264', 'VP9'].map((name, i) => ({ mimeType: 'video/' + name, sdpFmtpLine: 'profile=' + i }))
+  vi.stubGlobal('RTCRtpSender', { getCapabilities: () => ({ codecs }) })
+  const setCodecPreferences = vi.fn()
+  const tx = vi.spyOn(peer, 'addTransceiver').mockReturnValue({ mid: '0', setCodecPreferences } as { mid: string })
+  try {
+    await publish(peer as unknown as RTCPeerConnection, track as MediaStreamTrack, send,
+      { maxFramerate: 60 }, undefined, available ? 'H264' : 'AV1')
+    expect(tx).toHaveBeenCalledExactlyOnceWith(track, { direction: 'sendonly', sendEncodings: [{ maxFramerate: 60 }] })
+    if (available) expect(setCodecPreferences).toHaveBeenCalledExactlyOnceWith([codecs[2], codecs[3], codecs[0], codecs[1], codecs[4]])
+    else expect(setCodecPreferences).not.toHaveBeenCalled()
+    expect(send).toHaveBeenCalledOnce()
+  } finally { vi.unstubAllGlobals() }
+})

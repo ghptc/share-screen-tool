@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
+import { memo, useCallback, useMemo, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { publish, ScreenIceGatheringError, subscribe, type Signal } from './cloudflarePeer'
 import { roomEntry } from './roomEntry'
 import DesktopAudio from './DesktopAudio'
 import HostedAudio from './HostedAudio'
 import { readAudioPreference, writeAudioPreference } from './gameAudioSession'
 import { applyVideoTarget, nativeTarget, observeScreenActivity, type VideoTarget } from './videoQuality'
+import { supportedVideoCodecs, type CodecPreference } from './videoCodec'
 import PublishQuality from './PublishQuality'
+import RoomVideoBenchmark from './RoomVideoBenchmark'
 import CloudflareDiagnostics from './CloudflareDiagnostics'
 
 class TemporaryControlError extends Error {}
@@ -58,7 +60,7 @@ function ParticipantStrip({ participants }: { participants: Participant[] }) {
   )
 }
 
-function Video({ stream }: { stream: MediaStream }) {
+const Video = memo(function Video({ stream, presenting }: { stream: MediaStream; presenting: boolean }) {
   const element = useRef<HTMLVideoElement>(null)
   useEffect(() => {
     const video = element.current!
@@ -67,8 +69,30 @@ function Video({ stream }: { stream: MediaStream }) {
       video.srcObject = null
     }
   }, [stream])
-  return <video ref={element} autoPlay muted playsInline />
-}
+  const suspended = useRef(false)
+  useEffect(() => {
+    const video = element.current!
+    function update() {
+      if (!presenting && document.pictureInPictureElement !== video) {
+        if (!suspended.current) video.pause()
+        suspended.current = true
+      } else if (suspended.current) {
+        suspended.current = false
+        void video.play().catch(() => {}) // A later focus change can interrupt play().
+      }
+    }
+    update()
+    if (!presenting) {
+      video.addEventListener('enterpictureinpicture', update)
+      video.addEventListener('leavepictureinpicture', update)
+      return () => {
+        video.removeEventListener('enterpictureinpicture', update)
+        video.removeEventListener('leavepictureinpicture', update)
+      }
+    }
+  }, [presenting, stream])
+  return <video ref={element} autoPlay={presenting} muted playsInline />
+})
 
 function RemoteAudio({
   stream,
@@ -209,9 +233,19 @@ export default function CloudflareStage({
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [focus, setFocus] = useState('')
+  const [pageVisible, setPageVisible] = useState(() => !document.hidden)
+  useEffect(() => {
+    const update = () => setPageVisible(!document.hidden)
+    document.addEventListener('visibilitychange', update)
+    update()
+    return () => document.removeEventListener('visibilitychange', update)
+  }, [])
   const [qualityOpen, setQualityOpen] = useState(false)
   const [quality, setQuality] = useState(nativeTarget)
   const [qualityBusy, setQualityBusy] = useState(false)
+  const codecs = useMemo(() => canPublish ? supportedVideoCodecs() : [], [canPublish])
+  const [preferredCodec, setPreferredCodec] = useState<CodecPreference>('auto')
+  const nextCodec = useRef(preferredCodec)
   const sender = useRef<RTCRtpSender | undefined>(undefined)
   useEffect(() => {
     const current = sender.current
@@ -233,6 +267,12 @@ export default function CloudflareStage({
     setQualityBusy(true)
     try {
       await applyVideoTarget(current, current.track.getSettings(), value)
+      if (current !== sender.current) return
+      if (value.fps !== selectedQuality.current.fps && current.track.applyConstraints) {
+        // The sender cap still applies if a picker cannot update capture cadence.
+        await current.track.applyConstraints({ ...current.track.getConstraints(),
+          frameRate: { ideal: value.fps, max: value.fps } }).catch(() => {})
+      }
       if (current === sender.current) selectQuality(value)
     } catch {
       if (current === sender.current) setMessage('This browser could not apply the quality change.')
@@ -487,7 +527,7 @@ export default function CloudflareStage({
       const { flow, signal, publicationAnswered } = attach(local)
       try {
         const stream = await navigator.mediaDevices.getDisplayMedia({
-          video: { frameRate: { ideal: nativeTarget.fps, max: nativeTarget.fps } },
+          video: { frameRate: { ideal: selectedQuality.current.fps, max: selectedQuality.current.fps } },
           audio: withAudio,
           ...(withAudio && { systemAudio: 'include', windowAudio: 'window', selfBrowserSurface: 'exclude', surfaceSwitching: 'exclude' }),
         })
@@ -523,7 +563,7 @@ export default function CloudflareStage({
         }
         flow.cancelPublication = new AbortController()
         if ('contentHint' in track) track.contentHint = selectedQuality.current.content ?? ''
-        await publish(flow.pc, track, signal, { maxFramerate: selectedQuality.current.fps }, flow.cancelPublication.signal)
+        await publish(flow.pc, track, signal, { maxFramerate: selectedQuality.current.fps }, flow.cancelPublication.signal, nextCodec.current)
         if (!active || flows.get(local) !== flow) return
         publicationAnswered()
         sender.current = flow.pc.getSenders().find(s => s.track === track)
@@ -662,7 +702,7 @@ export default function CloudflareStage({
               hidden={focused && key !== focus}
               aria-label={key === local ? 'Your screen' : 'Remote screen'}
             >
-              <Video stream={stream} />
+              <Video stream={stream} presenting={pageVisible && (!focused || key === focus)} />
               <button
                 className="focus-surface"
                 aria-label={'Focus screen ' + (i + 1)}
@@ -687,6 +727,17 @@ export default function CloudflareStage({
         {qualityOpen && <div className="player-popover quality-menu" role="region" aria-label="Quality controls">
           {canPublish && !publishDenied && <PublishQuality contentControl value={quality} settings={sender.current?.track?.getSettings?.()}
             busy={busy || qualityBusy} sharing={sharing} onChange={target => void changeQuality(target)} />}
+          {canPublish && !publishDenied && codecs.length > 0 && <label>Video codec
+            <select value={preferredCodec} disabled={sharing || busy} onChange={e => {
+              nextCodec.current = e.target.value as CodecPreference
+              setPreferredCodec(nextCodec.current)
+            }}>
+              <option value="auto">Auto</option><option value="browser">Browser default</option>
+              {codecs.map(codec => <option key={codec} value={codec}>Prefer {codec === 'H264' ? 'H.264' : codec}</option>)}
+            </select>
+          </label>}
+          {tiles.length > 0 && <RoomVideoBenchmark root={stage} endpoints={tiles.flatMap(t =>
+            t.pc ? [{ pc: t.pc, stream: t.stream, local: t.key === local }] : [])} />}
           {media.map(m => {
             if (!m.pc) return null
             const own = m.key === local || m.key === localAudio
@@ -756,12 +807,11 @@ export default function CloudflareStage({
           })}
         </div>
         <button
-          onClick={() => {
-            void (
-              document.fullscreenElement
-                ? document.exitFullscreen()
-                : document.documentElement.requestFullscreen()
-            ).catch(() => setMessage('Fullscreen unavailable.'))
+          onClick={async () => {
+            try {
+              if (document.fullscreenElement) await document.exitFullscreen()
+              else await stage.current!.requestFullscreen()
+            } catch { setMessage('Fullscreen unavailable.') }
           }}
         >
           Fullscreen

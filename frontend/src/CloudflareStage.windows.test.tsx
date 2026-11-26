@@ -5,7 +5,8 @@ import CloudflareStage from './CloudflareStage'
 const opus = { mimeType: 'audio/opus', clockRate: 48000, channels: 2 }
 
 function publisher(surface: string, returnsAudio: boolean, audioStatus = 200, connectedAtAnswer = false, label = surface === 'window' ? 'Application Audio' : surface === 'monitor' ? 'System Audio' : 'Tab audio') {
-  const video = { kind: 'video', readyState: 'live', contentHint: '', getSettings: () => ({ displaySurface: surface }), stop: vi.fn() }
+  const video = { kind: 'video', readyState: 'live', contentHint: '',
+    getConstraints: () => ({ cursor: 'always' }), applyConstraints: vi.fn().mockResolvedValue(undefined), getSettings: () => ({ displaySurface: surface }), stop: vi.fn() }
   const audio = { kind: 'audio', label, readyState: 'live', stop: vi.fn(), onended: () => {} }
   const capture = vi.fn().mockResolvedValue({
     getVideoTracks: () => [video], getAudioTracks: () => returnsAudio ? [audio] : [],
@@ -15,7 +16,9 @@ function publisher(surface: string, returnsAudio: boolean, audioStatus = 200, co
   vi.stubGlobal('navigator', Object.create(navigator, {
     platform: { value: 'Win32' }, mediaDevices: { value: { getDisplayMedia: capture, getUserMedia: microphone } },
   }))
-  vi.stubGlobal('RTCRtpSender', { getCapabilities: () => ({ codecs: [opus, { mimeType: 'audio/PCMU' }] }) })
+  const videoCodecs = [{ mimeType: 'video/VP8' }, { mimeType: 'video/H264' }, { mimeType: 'video/rtx' }]
+  vi.stubGlobal('RTCRtpSender', { getCapabilities: (kind: string) => ({ codecs: kind === 'video' ? videoCodecs : [opus, { mimeType: 'audio/PCMU' }] }) })
+  const sender = { track: video, getParameters: () => ({ encodings: [{ maxFramerate: 60 }] }), setParameters: vi.fn().mockResolvedValue(undefined) }
   const peers: Peer[] = []
   class Peer extends EventTarget {
     track?: MediaStreamTrack
@@ -27,7 +30,7 @@ function publisher(surface: string, returnsAudio: boolean, audioStatus = 200, co
     setCodecPreferences = vi.fn()
     constructor() { super(); peers.push(this) }
     addTransceiver = vi.fn((track: MediaStreamTrack, _init: RTCRtpTransceiverInit) => { this.track = track; return this })
-    getSenders() { return [] }
+    getSenders() { return this.track?.kind === 'video' ? [sender] : [] }
     async createOffer() {
       return { type: 'offer', sdp: 'm=' + this.track!.kind + ' 9 UDP/TLS/RTP/SAVPF 111\r\na=candidate:test 1 UDP 1 local.test 5000 typ host\r\n' }
     }
@@ -73,7 +76,7 @@ function publisher(surface: string, returnsAudio: boolean, audioStatus = 200, co
   const finishInitialPoll = () => act(async () => {
     replyToState(Response.json({ publications: [], audio: {}, owned: [] }))
   })
-  return { start, peers, audio, video, consent, requests, finishInitialPoll }
+  return { start, peers, audio, video, consent, requests, finishInitialPoll, capture, sender }
 }
 
 afterEach(() => { cleanup(); localStorage.removeItem('screenShare.displayAudio'); vi.unstubAllGlobals() })
@@ -83,6 +86,7 @@ it.each([60, 30, 15])('sets the %i FPS sender ceiling on the initial video offer
   fireEvent.click(screen.getByRole('button', { name: 'Quality' }))
   fireEvent.change(screen.getByLabelText('Publish FPS'), { target: { value: String(fps) } })
   await p.start(false)
+  expect(p.capture).toHaveBeenCalledWith(expect.objectContaining({ video: { frameRate: { ideal: fps, max: fps } } }))
   expect(p.video.contentHint).toBe('')
   expect(p.peers[0].addTransceiver).toHaveBeenCalledWith(p.video,
     { direction: 'sendonly', sendEncodings: [{ maxFramerate: fps }] })
@@ -185,4 +189,25 @@ it.each(['motion', 'detail'])('applies the selected %s preference before encodin
   fireEvent.change(screen.getByLabelText('Content preference'), { target: { value: content } })
   await p.start(false)
   expect(p.video.contentHint).toBe(content)
+})
+
+it('changes capture cadence in place and accepts a sender-only ceiling if the source declines', async () => {
+  const p = publisher('monitor', false)
+  fireEvent.click(screen.getByRole('button', { name: 'Quality' }))
+  fireEvent.change(screen.getByLabelText('Video codec'), { target: { value: 'H264' } })
+  await p.start(false)
+  expect(p.peers[0].setCodecPreferences).toHaveBeenCalledExactlyOnceWith([
+    { mimeType: 'video/H264' }, { mimeType: 'video/VP8' }, { mimeType: 'video/rtx' },
+  ])
+  expect(screen.getByLabelText('Video codec')).toBeDisabled()
+  for (const fps of [30, 15]) {
+    if (fps === 15) p.video.applyConstraints.mockRejectedValueOnce(new Error('Unsupported constraint'))
+    fireEvent.change(screen.getByLabelText('Publish FPS'), { target: { value: String(fps) } })
+    await waitFor(() => expect(screen.getByLabelText('Publish FPS')).toHaveValue(String(fps)))
+    expect(p.video.applyConstraints).toHaveBeenLastCalledWith({ cursor: 'always', frameRate: { ideal: fps, max: fps } })
+    expect(p.sender.setParameters).toHaveBeenLastCalledWith({ encodings: [{ scaleResolutionDownBy: 1, maxFramerate: fps }] })
+  }
+  expect(p.peers).toHaveLength(1)
+  expect(p.capture).toHaveBeenCalledOnce()
+  expect(p.peers[0].addTransceiver).toHaveBeenCalledOnce()
 })

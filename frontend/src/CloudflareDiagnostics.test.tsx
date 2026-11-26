@@ -41,3 +41,28 @@ it('samples the existing receiver and element independently while diagnostics ar
   await vi.advanceTimersByTimeAsync(6000)
   expect(getStats).toHaveBeenCalledTimes(3)
 })
+
+it('measures two existing peers on one 30-second clock without exposing peer identifiers', async () => {
+  const { default: RoomVideoBenchmark } = await import('./RoomVideoBenchmark')
+  vi.useFakeTimers()
+  const root = document.createElement('div')
+  const endpoints = [0, 1].map(n => {
+    const stream = {} as MediaStream
+    const element = root.appendChild(document.createElement('video'))
+    element.srcObject = stream
+    const getStats = vi.fn(async () => {
+      const timestamp = performance.now()
+      return new Map([['unused', { id: 'sensitive-handle-' + n, type: 'inbound-rtp', kind: 'video', timestamp,
+        framesReceived: Math.round(timestamp * .06), framesDecoded: Math.round(timestamp * .05) }]])
+    })
+    return { stream, local: false, pc: { getStats, connectionState: 'connected' } as unknown as RTCPeerConnection }
+  })
+  render(<RoomVideoBenchmark endpoints={endpoints} root={{ current: root }} />)
+  expect(endpoints[0].pc.getStats).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: /Measure all/ }))
+  await act(() => vi.advanceTimersByTimeAsync(30001))
+  const result = screen.getByRole<HTMLTextAreaElement>('textbox').value
+  expect(result).not.toMatch(/sensitive-handle/)
+  expect(JSON.parse(result).screens).toMatchObject([1, 2].map(tile => ({ tile, seconds: 30, decodedFps: 50, receivedFps: 60 })))
+  endpoints.forEach(e => expect(e.pc.getStats).toHaveBeenCalledTimes(16))
+})

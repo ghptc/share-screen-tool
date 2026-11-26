@@ -1,3 +1,5 @@
+import { configureVideoCodec, type CodecPreference } from './videoCodec'
+
 // The application exchanges only room-scoped handles and WebRTC descriptions.
 export type Signal = (
   op: string,
@@ -100,11 +102,16 @@ export async function publish(
   send: Signal,
   encoding?: RTCRtpEncodingParameters,
   cancel?: AbortSignal,
+  preferredVideoCodec?: CodecPreference,
 ) {
   const tx = pc.addTransceiver(track, {
     direction: 'sendonly',
     ...(encoding && { sendEncodings: [encoding] }),
   })
+  if (track.kind === 'video' && preferredVideoCodec) {
+    await configureVideoCodec(tx, preferredVideoCodec, track.getSettings?.() ?? {}, encoding?.maxFramerate)
+    cancel?.throwIfAborted()
+  }
   if (track.kind === 'audio') {
     const opus = RTCRtpSender.getCapabilities('audio')?.codecs.filter(
       codec => codec.mimeType.toLowerCase() === 'audio/opus' && codec.clockRate === 48000 && codec.channels === 2,

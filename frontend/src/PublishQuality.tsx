@@ -13,8 +13,8 @@ export default function PublishQuality({ value, settings, busy, sharing, onChang
   return <>
     {contentControl && <label>Content preference <select disabled={busy} value={value.content ?? ''}
       onChange={e => onChange({ ...value, content: e.target.value as VideoTarget['content'] })}>
-      <option value="">Automatic</option><option value="detail">Desktop and text · preserve resolution</option>
-      <option value="motion">Games and motion · preserve frame rate</option>
+      <option value="">Auto</option><option value="detail">Clarity · preserve resolution</option>
+      <option value="motion">Motion · preserve frame rate</option>
     </select></label>}
     <label>Publish FPS <select value={value.fps} disabled={busy} onChange={e => onChange({...value, fps: Number(e.target.value)})}>
       {[60, 30, 15].map(fps => <option key={fps}>{fps}</option>)}

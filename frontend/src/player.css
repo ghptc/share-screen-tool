@@ -94,3 +94,5 @@ main.player {
 .participant-strip img, .participant-initial { width: 24px; height: 24px; border-radius: 50%; }
 .participant-initial { display: grid; place-items: center; background: #303237; }
 .participant-strip small { color: var(--muted); }
+
+.quality-menu textarea { width: 100%; box-sizing: border-box; font: 12px monospace; }

@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useState, type RefObject } from 'react'
+import { displayedFps } from './videoMeasurement'
 import { measureMedia, sampleReport, type StatsSample } from './mediaStats'
 
 type Props = {
@@ -16,15 +17,6 @@ function number(n?: number, digits = 1) {
 }
 function kbps(n?: number) { return n === undefined ? unknown : number(n / 1000, 0) }
 function size(width?: number, height?: number) { return width && height ? `${width} × ${height}` : unknown }
-
-// Playback quality counts displayed and discarded frames since element creation.
-function displayedFps(now?: VideoPlaybackQuality, before?: VideoPlaybackQuality) {
-  if (!now || !before) return
-  const ms = now.creationTime - before.creationTime
-  const total = now.totalVideoFrames - before.totalVideoFrames
-  const dropped = now.droppedVideoFrames - before.droppedVideoFrames
-  if (ms > 0 && ms <= 10000 && dropped >= 0 && total >= dropped) return (total - dropped) * 1000 / ms
-}
 
 export default function CloudflareDiagnostics({ pc, local, audio, label, stream, root }: Props) {
   const [open, setOpen] = useState(false)
@@ -74,6 +66,7 @@ export default function CloudflareDiagnostics({ pc, local, audio, label, stream,
             ['Encoder target / estimated uplink (kb/s)', `${kbps(m.targetBps)} / ${kbps(m.availableBps)}`],
             ['Content hint / sender degradation preference', `${sender?.track?.contentHint || 'Automatic'} / ${sender?.getParameters().degradationPreference ?? 'Browser default'}`],
             ['Keyframes encoded / encode ms per frame', `${number(m.keyFrames, 0)} / ${number(m.encodeMs)}`],
+            ['Power-efficient encoder', m.powerEfficient === undefined ? unknown : String(m.powerEfficient)],
             ['Encoder / quality limitation', `${m.encoder ?? unknown} / ${m.limitation ?? unknown}`])
         } else {
           const video = element as HTMLVideoElement | undefined
@@ -84,6 +77,8 @@ export default function CloudflareDiagnostics({ pc, local, audio, label, stream,
           playback = quality
           next.push(['Received / decoded / displayed FPS', [m.transportFps, m.fps, fps].map(n => number(n)).join(' / ')],
             ['Keyframes decoded / jitter buffer ms per frame', `${number(m.keyFrames, 0)} / ${number(m.jitterBufferMs)}`],
+            ['Decoder / ms per frame', `${m.decoder ?? unknown} / ${number(m.decodeMs)}`],
+            ['Power-efficient decoder', m.powerEfficient === undefined ? unknown : String(m.powerEfficient)],
             ['Decoded size', size(m.width, m.height)],
             ['Receiver frame interval SD (ms)', number(m.frameIntervalDeviationMs)],
             ['Receiver drops / freezes (totals)', `${number(m.dropped, 0)} / ${number(m.freezes, 0)}`],
