@@ -136,7 +136,7 @@ func (a *API) cfState(w http.ResponseWriter, r *http.Request, b roomAccess, id s
 		var status int
 		snapshot, changed, status = a.snapshot(b, id, handles, seen)
 		if status != 200 {
-			fail(w, status, "Room access unavailable")
+			roomAuthFailure(w, status, authReason(status), "Room access unavailable")
 		}
 		return status == 200
 	}
@@ -189,11 +189,11 @@ func (a *API) cfState(w http.ResponseWriter, r *http.Request, b roomAccess, id s
 			return
 		}
 		if finished || snapshot.Version != in.Version {
-			if _, status := a.checkDiscord(r.Context(), "dc-"+b.ref, id); status != 200 {
-				fail(w, status, "Voice authorization ended")
+			if _, status, reason := a.checkDiscord(r.Context(), "dc-"+b.ref, id); status != 200 {
+				roomAuthFailure(w, status, reason, "Voice authorization ended")
 				return
 			}
-			if !refresh(nil, time.Time{}) {
+			if !refresh(in.Handles, a.now()) {
 				return
 			}
 			write(w, 200, snapshot)

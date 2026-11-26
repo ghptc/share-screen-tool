@@ -77,10 +77,17 @@ func main() {
 		s.SyncEvents = true
 		s.ShouldReconnectOnError = false
 		s.StateEnabled = false
-		offline := make(chan struct{})
+		disconnected := make(chan struct{}, 1)
+		invalid := make(chan struct{})
 		var once sync.Once
-		failed := func() { once.Do(func() { gateway.Offline(); close(offline) }) }
-		s.AddHandler(func(_ *dg.Session, _ *dg.Disconnect) { failed() })
+		failed := func() { once.Do(func() { gateway.Offline(); close(invalid) }) }
+		s.AddHandler(func(_ *dg.Session, _ *dg.Disconnect) {
+			gateway.Suspend()
+			select {
+			case disconnected <- struct{}{}:
+			default:
+			}
+		})
 		s.AddHandler(func(s *dg.Session, e *dg.Event) {
 			if !gateway.Observe(e) {
 				failed()
@@ -101,21 +108,47 @@ func main() {
 		mu.Lock()
 		session, current = s, gateway
 		mu.Unlock()
-		if err = s.Open(); err == nil {
-			app, err := s.User("@me")
-			if err == nil {
-				for _, g := range dir.Guilds() {
-					if _, e := s.ApplicationCommandCreate(app.ID, g, &dg.ApplicationCommand{Name: "live", Description: "Watch or share in your current voice channel"}); e != nil {
-						log.Print("guild command registration failed")
+		registered := false
+		delay := time.Second
+		failedOpens := 0
+	connection:
+		for ctx.Err() == nil {
+			if err = s.Open(); err == nil {
+				failedOpens = 0
+				if !registered {
+					app, err := s.User("@me")
+					if err == nil {
+						for _, g := range dir.Guilds() {
+							if _, e := s.ApplicationCommandCreate(app.ID, g, &dg.ApplicationCommand{Name: "live", Description: "Watch or share in your current voice channel"}); e != nil {
+								log.Print("guild command registration failed")
+							}
+						}
+						registered = true
 					}
 				}
+				select {
+				case <-ctx.Done():
+					break connection
+				case <-invalid:
+					break connection
+				case <-disconnected:
+				}
+				delay = time.Second
+			} else {
+				log.Print("Discord Gateway connection failed")
+				failedOpens++
+				if failedOpens >= 3 {
+					break connection
+				} // A non-resumable session needs a fresh Identify.
 			}
 			select {
 			case <-ctx.Done():
-			case <-offline:
+				break connection
+			case <-invalid:
+				break connection
+			case <-time.After(delay):
 			}
-		} else {
-			log.Print("Discord Gateway connection failed")
+			delay = min(30*time.Second, delay*2)
 		}
 		gateway.Offline()
 		mu.Lock()

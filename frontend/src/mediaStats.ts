@@ -6,6 +6,8 @@ export type MediaStat = RTCStats & {
   framesEncoded?: number; framesDecoded?: number; frameWidth?: number; frameHeight?: number
   framesSent?: number; framesReceived?: number; framesPerSecond?: number; freezeCount?: number
   framesRendered?: number; totalInterFrameDelay?: number; totalSquaredInterFrameDelay?: number
+  keyFramesEncoded?: number; keyFramesDecoded?: number; totalEncodeTime?: number
+  totalSamplesReceived?: number; concealedSamples?: number; jitterBufferDelay?: number; jitterBufferEmittedCount?: number
   jitter?: number; targetBitrate?: number; availableOutgoingBitrate?: number; totalAudioEnergy?: number
   localId?: string; remoteId?: string; fractionLost?: number; roundTripTime?: number
   selectedCandidatePairId?: string; currentRoundTripTime?: number; state?: string; dtlsState?: string
@@ -17,6 +19,7 @@ export type MediaMetrics = {
   captureFps?: number; dropped?: number; encoder?: string; limitation?: string
   transportFps?: number; jitterMs?: number; targetBps?: number; availableBps?: number; freezes?: number
   packetsPerSecond?: number; audioEnergyDelta?: number
+  keyFrames?: number; encodeMs?: number; jitterBufferMs?: number; receivedSamples?: number; concealedSamples?: number
   frameIntervalDeviationMs?: number
   layers: number
 }
@@ -82,7 +85,16 @@ export function measureMedia(current: StatsSample, previous: StatsSample | undef
     if (count && count > 1 && finite(delay) && finite(squared))
       frameIntervalDeviationMs = 1000 * Math.sqrt(Math.max(0, squared / count - (delay / count) ** 2))
   }
-  return { direction, captureFps: source?.frames === undefined ? source?.framesPerSecond : perSecond(source, previous, 'frames'),
+  const encoded = best && delta(best, previous, 'framesEncoded')
+  const encodeTime = best && delta(best, previous, 'totalEncodeTime')
+  const emitted = best && delta(best, previous, 'jitterBufferEmittedCount')
+  const bufferDelay = best && delta(best, previous, 'jitterBufferDelay')
+  return { direction,
+    keyFrames: local ? best?.keyFramesEncoded : best?.keyFramesDecoded,
+    encodeMs: encoded && finite(encodeTime) ? 1000 * encodeTime / encoded : undefined,
+    jitterBufferMs: emitted && finite(bufferDelay) ? 1000 * bufferDelay / emitted : undefined,
+    receivedSamples: best && delta(best, previous, 'totalSamplesReceived'),
+    concealedSamples: best && delta(best, previous, 'concealedSamples'), captureFps: source?.frames === undefined ? source?.framesPerSecond : perSecond(source, previous, 'frames'),
     transportFps: best ? perSecond(best, previous, local ? 'framesSent' : 'framesReceived') : undefined,
     jitterMs: finite(jitter) ? jitter * 1000 : undefined, targetBps: best?.targetBitrate,
     frameIntervalDeviationMs,

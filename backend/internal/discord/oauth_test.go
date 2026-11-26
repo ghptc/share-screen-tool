@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -137,5 +139,100 @@ func TestRoomAvatarHidesDiscordIdentifiers(t *testing.T) {
 	body += strings.Repeat("x", 8192)
 	if o.avatar(t.Context(), user) != "" {
 		t.Fatal("oversized avatar accepted")
+	}
+}
+
+func TestRoomIdentityRenewalRotationAndRevocation(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	var exchanges, checks atomic.Int32
+	var unavailable, revoked, changed atomic.Bool
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			n := exchanges.Add(1)
+			if id, secret, ok := r.BasicAuth(); !ok || id != "client" || secret != "secret" ||
+				r.FormValue("grant_type") != "refresh_token" || r.FormValue("refresh_token") != fmt.Sprintf("r%d", n-1) {
+				t.Error("incorrect rotation")
+			}
+			if revoked.Load() {
+				w.WriteHeader(400)
+				fmt.Fprint(w, `{"error":"invalid_grant"}`)
+				return
+			}
+			fmt.Fprintf(w, `{"access_token":"a%d","refresh_token":"r%d","expires_in":120,"token_type":"bearer"}`, n, n)
+		case "/user":
+			checks.Add(1)
+			if unavailable.Load() {
+				w.WriteHeader(503)
+				return
+			}
+			if r.Header.Get("Authorization") != fmt.Sprintf("Bearer a%d", exchanges.Load()) {
+				t.Error("stale access token")
+			}
+			if changed.Load() {
+				fmt.Fprint(w, `{"id":"98"}`)
+				return
+			}
+			fmt.Fprint(w, `{"id":"99"}`)
+		}
+	}))
+	defer provider.Close()
+	o := NewRoomOAuth(OAuthConfig{ClientID: "client", Secret: "secret", TokenURL: provider.URL + "/token", UserURL: provider.URL + "/user"}, nil, func() time.Time { return now })
+	p := &identityProof{}
+	p.install(oauthTokens{Access: "a0", Refresh: "r0", Seconds: 120}, now)
+	p.verified(now)
+	s := Session{ID: "browser", User: "99", Until: now.Add(RoomLifetime), proof: p}
+	o.sessions[s.ID] = s
+	now = now.Add(108 * time.Second)
+	var wg sync.WaitGroup
+	for range 12 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if o.RenewIdentity(t.Context(), s) != 200 {
+				t.Error("renewal failed")
+			}
+		}()
+	}
+	wg.Wait()
+	if exchanges.Load() != 1 || checks.Load() != 1 {
+		t.Fatal("concurrent rotation")
+	}
+	now = now.Add(108 * time.Second)
+	unavailable.Store(true)
+	if o.RenewIdentity(t.Context(), s) != 200 {
+		t.Fatal("discarded still-valid proof")
+	}
+	now = now.Add(12 * time.Second)
+	if o.RenewIdentity(t.Context(), s) != 503 || o.RenewIdentity(t.Context(), s) != 503 {
+		t.Fatal("extended an expired proof")
+	}
+	if checks.Load() != 3 || exchanges.Load() != 2 {
+		t.Fatal("backoff or rotated credentials lost")
+	}
+	unavailable.Store(false)
+	now = now.Add(3 * time.Second)
+	if o.RenewIdentity(t.Context(), s) != 200 || exchanges.Load() != 2 {
+		t.Fatal("recovery repeated refresh")
+	}
+	if got, ok := o.Session(s.ID); !ok || got.Until != s.Until {
+		t.Fatal("changed admission deadline")
+	}
+	now = now.Add(110 * time.Second)
+	revoked.Store(true)
+	if o.RenewIdentity(t.Context(), s) != 403 {
+		t.Fatal("revocation ignored")
+	}
+	if _, ok := o.Session(s.ID); ok || o.RenewIdentity(t.Context(), s) != 401 {
+		t.Fatal("revived revoked login")
+	}
+
+	// A successful OAuth response for another subject can never renew this user.
+	changed.Store(true)
+	p = &identityProof{tokens: oauthTokens{Access: "a3"}}
+	s.proof = p
+	o.sessions[s.ID] = s
+	if o.RenewIdentity(t.Context(), s) != 403 {
+		t.Fatal("accepted changed subject")
 	}
 }

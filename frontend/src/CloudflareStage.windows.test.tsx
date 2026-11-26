@@ -4,9 +4,9 @@ import CloudflareStage from './CloudflareStage'
 
 const opus = { mimeType: 'audio/opus', clockRate: 48000, channels: 2 }
 
-function publisher(surface: string, returnsAudio: boolean, audioStatus = 200, connectedAtAnswer = false) {
+function publisher(surface: string, returnsAudio: boolean, audioStatus = 200, connectedAtAnswer = false, label = surface === 'window' ? 'Application Audio' : surface === 'monitor' ? 'System Audio' : 'Tab audio') {
   const video = { kind: 'video', readyState: 'live', contentHint: '', getSettings: () => ({ displaySurface: surface }), stop: vi.fn() }
-  const audio = { kind: 'audio', readyState: 'live', stop: vi.fn(), onended: () => {} }
+  const audio = { kind: 'audio', label, readyState: 'live', stop: vi.fn(), onended: () => {} }
   const capture = vi.fn().mockResolvedValue({
     getVideoTracks: () => [video], getAudioTracks: () => returnsAudio ? [audio] : [],
     getTracks: () => returnsAudio ? [video, audio] : [video],
@@ -56,11 +56,11 @@ function publisher(surface: string, returnsAudio: boolean, audioStatus = 200, co
   vi.spyOn(console, 'debug').mockImplementation(() => {})
   render(<CloudflareStage channel="room" canPublish identity="publisher" control="" onDenied={vi.fn()} onExpired={vi.fn()} />)
   const consent = screen.getByRole('checkbox', { name: 'Share audio' })
-  expect(consent).not.toBeChecked()
+  expect(consent).toBeChecked()
   expect(capture).not.toHaveBeenCalled()
   const start = async (withAudio: boolean) => {
+    if (!withAudio) fireEvent.click(consent)
     if (withAudio) {
-      fireEvent.click(consent)
       expect(screen.getByText(/system audio can include other apps/i)).toBeVisible()
     }
     fireEvent.click(screen.getByRole('button', { name: 'Share my screen' }))
@@ -76,14 +76,14 @@ function publisher(surface: string, returnsAudio: boolean, audioStatus = 200, co
   return { start, peers, audio, video, consent, requests, finishInitialPoll }
 }
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); localStorage.removeItem('screenShare.displayAudio'); vi.unstubAllGlobals() })
 
 it.each([60, 30, 15])('sets the %i FPS sender ceiling on the initial video offer', async fps => {
   const p = publisher('monitor', false)
   fireEvent.click(screen.getByRole('button', { name: 'Quality' }))
   fireEvent.change(screen.getByLabelText('Publish FPS'), { target: { value: String(fps) } })
   await p.start(false)
-  expect(p.video.contentHint).toBe('motion')
+  expect(p.video.contentHint).toBe('')
   expect(p.peers[0].addTransceiver).toHaveBeenCalledWith(p.video,
     { direction: 'sendonly', sendEncodings: [{ maxFramerate: fps }] })
 })
@@ -118,7 +118,7 @@ it('stops an unexpected audio track when consent was off', async () => {
 
 it.each([
   ['browser', 'Sharing tab audio.'], ['monitor', 'Sharing system audio, including sounds from other apps.'],
-  ['window', 'Sharing picker audio. If you selected system audio, other apps are included.'],
+  ['window', 'Sharing selected application audio.'],
 ])('publishes consented %s audio once the owned video is ready', async (surface, status) => {
   const p = publisher(surface, true)
   await p.start(true)
@@ -137,7 +137,7 @@ it.each([
   expect(p.audio.stop).toHaveBeenCalled()
   expect(p.video.stop).toHaveBeenCalled()
   expect(p.requests.filter(r => r.op === 'close').map(r => r.handle).sort()).toEqual(['display-sound', 'video'])
-  expect(p.consent).not.toBeChecked()
+  expect(p.consent).toBeChecked()
 })
 
 it('continues sharing video when audio negotiation fails', async () => {
@@ -168,4 +168,21 @@ it('withdraws only audio when Chrome ends its audio track', async () => {
   expect(p.requests.filter(r => r.op === 'close').map(r => r.handle)).toEqual(['display-sound'])
   expect(screen.getByRole('status')).toHaveTextContent(/browser stopped sharing audio/i)
   expect(p.video.stop).not.toHaveBeenCalled()
+})
+
+it.each(['System Audio', '', 'Unknown'])('discards a window track with unverified application scope (%s)', async label => {
+  const p = publisher('window', true, 200, false, label)
+  await p.start(true)
+  await act(async () => p.peers[0].connect())
+  expect(p.audio.stop).toHaveBeenCalled()
+  expect(p.peers).toHaveLength(1)
+  expect(screen.getByRole('status')).toHaveTextContent(/did not identify application-only audio/i)
+})
+
+it.each(['motion', 'detail'])('applies the selected %s preference before encoding', async content => {
+  const p = publisher('monitor', false)
+  fireEvent.click(screen.getByRole('button', { name: 'Quality' }))
+  fireEvent.change(screen.getByLabelText('Content preference'), { target: { value: content } })
+  await p.start(false)
+  expect(p.video.contentHint).toBe(content)
 })

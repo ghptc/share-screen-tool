@@ -40,6 +40,7 @@ func Simulator(c *Config, key string, initial FixtureState) http.Handler {
 	}
 	codes := map[string]fixtureCode{}
 	tokens := map[string]fixtureCode{}
+	refreshTokens := map[string]fixtureCode{}
 	m.Handle("/voice", VoiceHandler(c.VoiceKey, func(g, u string) (Presence, bool) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -109,34 +110,59 @@ func Simulator(c *Config, key string, initial FixtureState) http.Handler {
 		id, secret, _ := r.BasicAuth()
 		mu.Lock()
 		defer mu.Unlock()
-		v, ok := codes[r.FormValue("code")]
-		delete(codes, r.FormValue("code"))
-		sum := sha256.Sum256([]byte(r.FormValue("code_verifier")))
-		if !ok || time.Now().After(v.until) || id != c.ClientID || secret != c.Secret || v.challenge != base64.RawURLEncoding.EncodeToString(sum[:]) || r.FormValue("redirect_uri") != c.Origin+"/api/discord/callback" {
-			http.Error(w, "Denied", 403)
+		if id != c.ClientID || secret != c.Secret {
+			http.Error(w, "Denied", 401)
 			return
 		}
-		for k, t := range tokens {
-			if time.Now().After(t.until) {
-				delete(tokens, k)
+		var v fixtureCode
+		var ok bool
+		now := time.Now()
+		grantType := r.FormValue("grant_type")
+		switch grantType {
+		case "authorization_code":
+			code := r.FormValue("code")
+			v, ok = codes[code]
+			delete(codes, code)
+			sum := sha256.Sum256([]byte(r.FormValue("code_verifier")))
+			ok = ok && now.Before(v.until) && v.challenge == base64.RawURLEncoding.EncodeToString(sum[:]) && r.FormValue("redirect_uri") == c.Origin+"/api/discord/callback"
+			v.until = now.Add(RoomLifetime)
+		case "refresh_token":
+			key := r.FormValue("refresh_token")
+			v, ok = refreshTokens[key]
+			ok = ok && now.Before(v.until)
+		}
+		if !ok {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid_grant"})
+			return
+		}
+		for _, grants := range []map[string]fixtureCode{tokens, refreshTokens} {
+			for k, t := range grants {
+				if !now.Before(t.until) {
+					delete(grants, k)
+				}
 			}
 		}
-		if len(tokens) >= 2048 {
+		if len(tokens) >= 2048 || (grantType != "refresh_token" && len(refreshTokens) >= 2048) {
 			http.Error(w, "Busy", 429)
 			return
 		}
-		token := rand.Text()
-		tokens["Bearer "+token] = v
-		json.NewEncoder(w).Encode(map[string]string{"access_token": token, "token_type": "Bearer"})
+		if grantType == "refresh_token" {
+			delete(refreshTokens, r.FormValue("refresh_token"))
+		}
+		access, refresh := rand.Text(), rand.Text()
+		refreshTokens[refresh] = v
+		v.until = now.Add(time.Minute)
+		tokens["Bearer "+access] = v
+		json.NewEncoder(w).Encode(map[string]any{"access_token": access, "token_type": "Bearer", "refresh_token": refresh, "expires_in": 60})
 	})
 	m.HandleFunc("GET /user", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		k := r.Header.Get("Authorization")
 		v, ok := tokens[k]
-		delete(tokens, k)
 		if !ok || time.Now().After(v.until) {
-			http.Error(w, "Denied", 403)
+			http.Error(w, "Denied", 401)
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]string{"id": v.user, "username": "Fixture member"})

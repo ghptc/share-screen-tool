@@ -21,12 +21,16 @@ type guildState struct {
 	users    map[string]Presence
 }
 type Gateway struct {
-	mu     sync.Mutex
-	seq    int64
-	ready  bool
-	guilds map[string]*guildState
+	mu        sync.Mutex
+	seq       int64
+	ready     bool
+	replaying bool
+	guilds    map[string]*guildState
 }
 
+// A resumable disconnect keeps the sequence cursor but fences every lookup
+// until Discord finishes replaying the intervening dispatches.
+func (g *Gateway) Suspend() { g.mu.Lock(); defer g.mu.Unlock(); g.replaying = true }
 func (g *Gateway) Offline() { g.mu.Lock(); defer g.mu.Unlock(); g.ready = false; g.guilds = nil }
 func (g *Gateway) Observe(e *dg.Event) bool {
 	g.mu.Lock()
@@ -34,6 +38,7 @@ func (g *Gateway) Observe(e *dg.Event) bool {
 	if e.Type == "READY" {
 		g.seq = e.Sequence
 		g.ready = true
+		g.replaying = false
 		g.guilds = map[string]*guildState{}
 		return true
 	}
@@ -43,6 +48,9 @@ func (g *Gateway) Observe(e *dg.Event) bool {
 		return false
 	}
 	g.seq = e.Sequence
+	if e.Type == "RESUMED" {
+		g.replaying = false
+	}
 	// discordgo can dispatch a partially decoded event after a JSON error.
 	// A malformed membership transition invalidates the complete snapshot.
 	if e.RawData != nil {
@@ -134,7 +142,7 @@ func (g *Gateway) Lookup(guild, user string, lastAck time.Time) (Presence, bool)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	s := g.guilds[guild]
-	if !g.ready || s == nil || time.Since(lastAck) > 65*time.Second {
+	if !g.ready || g.replaying || s == nil || time.Since(lastAck) > 65*time.Second {
 		return Presence{}, false
 	}
 	p, ok := s.users[user]

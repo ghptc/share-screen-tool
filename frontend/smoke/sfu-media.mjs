@@ -269,7 +269,7 @@ try {
     await Promise.all(pages.map((p) => p.clock.fastForward(36_000_000)))
     console.log('expire-video-grants')
     for (const page of pages) {
-      await page.getByRole('heading', { name: 'Session expired — reopen the link' }).waitFor()
+      await page.getByRole('heading', { name: 'Session expired' }).waitFor()
       if (
         !(await page.evaluate(
           () =>
@@ -280,7 +280,7 @@ try {
       )
         throw Error('Expired media remained live')
       await page.reload()
-      await page.getByRole('heading', { name: 'Session expired — reopen the link' }).waitFor()
+      await page.getByRole('heading', { name: 'Session expired' }).waitFor()
       await page.clock.fastForward(30_000)
     }
     if (unexpected.length) throw Error('Expired tab attempted authorization')

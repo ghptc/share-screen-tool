@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { publish, ScreenIceGatheringError, subscribe, type Signal } from './cloudflarePeer'
+import { roomEntry } from './roomEntry'
 import DesktopAudio from './DesktopAudio'
 import HostedAudio from './HostedAudio'
 import { readAudioPreference, writeAudioPreference } from './gameAudioSession'
-import { applyVideoTarget, nativeTarget, type VideoTarget } from './videoQuality'
+import { applyVideoTarget, nativeTarget, observeScreenActivity, type VideoTarget } from './videoQuality'
 import PublishQuality from './PublishQuality'
 import CloudflareDiagnostics from './CloudflareDiagnostics'
+
+class TemporaryControlError extends Error {}
 
 type Flow = {
   audioFor?: string
   displayAudio?: MediaStreamTrack
   ready?: boolean
   announcing?: boolean
+  readyRetries?: number
   negotiated?: boolean
   pc: RTCPeerConnection
   handle?: string
@@ -27,11 +31,16 @@ const defaultMix: Mix = { volume: 100, muted: false }
 const local = 'local'
 const localAudio = 'local-audio'
 const initialSubscriptionRetry = 1000
+// Chromium's capture-device names distinguish process capture from the system
+// fallback. Unknown scope stays video-only. Never log a returned track label.
+const chromiumAudioLabels: Record<string, string | undefined> = {
+  window: 'Application Audio', monitor: 'System Audio', browser: 'Tab audio',
+}
 
 function missingAudio(surface?: string) {
   if (surface === 'browser') return 'Video only. Share again and enable tab audio in the browser picker.'
   if (surface === 'monitor') return 'Video only. Share again and enable system audio for Entire Screen if offered. System audio includes other apps.'
-  if (surface === 'window') return 'Video only. The browser returned no window audio. Try a Chrome tab with tab audio, or choose Entire Screen if you want to share system audio.'
+  if (surface === 'window') return 'Video only. The browser returned no window audio. Share again if the picker offers application audio.'
   return 'Video only. The browser returned no audio track. Share again and enable audio in the picker if offered.'
 }
 
@@ -164,8 +173,9 @@ export default function CloudflareStage({
   control: string
   canPublish: boolean
   onExpired: () => void
-  onDenied: () => void
+  onDenied: (reason: string) => void
 }) {
+  const [publishDenied, setPublishDenied] = useState(false)
   const [media, setMedia] = useState<MediaFlow[]>([])
   const [participants, setParticipants] = useState<Participant[]>([])
   const [publishers, setPublishers] = useState<Record<string, string>>({})
@@ -176,7 +186,7 @@ export default function CloudflareStage({
   const windows = /^Win/i.test(navigator.platform)
   const [browserAudioStatus, setBrowserAudioStatus] = useState('')
   const [audioEnabled, setAudioEnabled] = useState(
-    () => !windows && readAudioPreference('whiterun.gameAudio.enabled') !== 'off',
+    () => readAudioPreference(windows ? 'screenShare.displayAudio' : 'whiterun.gameAudio.enabled') !== 'off',
   )
   const [audioOpen, setAudioOpen] = useState(false)
   const pairNativeAudio = import.meta.env.VITE_NATIVE_AUDIO_MODE === 'pair' ||
@@ -203,6 +213,12 @@ export default function CloudflareStage({
   const [quality, setQuality] = useState(nativeTarget)
   const [qualityBusy, setQualityBusy] = useState(false)
   const sender = useRef<RTCRtpSender | undefined>(undefined)
+  useEffect(() => {
+    const current = sender.current
+    if (!screen || !current?.track) return
+    if (!quality.content) return observeScreenActivity(current)
+    if ('contentHint' in current.track) current.track.contentHint = quality.content
+  }, [screen, quality.content])
   const selectedQuality = useRef(nativeTarget)
   function selectQuality(value: VideoTarget) {
     selectedQuality.current = value
@@ -241,10 +257,33 @@ export default function CloudflareStage({
     // An advertised publication can outlive a failed receiving peer.
     const subscriptions = new Map<string, Subscription>()
     const endpoint = '/api/discord/' + channel + '/media/'
+    let renewal: Promise<void> | undefined
+    let generation = 0
+    async function renew() {
+      const response = await fetch('/api/discord/' + channel + '/join', {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store', body: JSON.stringify({ resumePeer: identity }),
+        headers: { 'Content-Type': 'application/json', 'X-Whiterun-Entry': roomEntry(channel).key },
+        signal: AbortSignal.any([stateRequest.signal, AbortSignal.timeout(10000)]),
+      })
+      const result = await response.json().catch(() => ({}))
+      if (!active) throw new Error('Sharing ended.')
+      if (response.ok && result?.identity === identity) {
+        generation++
+        return
+      }
+      if (response.ok || [401, 403, 410].includes(response.status)) {
+        dispose()
+        if (response.status === 410) expired.current()
+        else denied.current(response.ok || response.status === 401 ? 'session_missing' : result?.reason ?? 'authorization_denied')
+      }
+      throw new TemporaryControlError('Room authorization unavailable.')
+    }
     async function request(op: string, input: Record<string, unknown>) {
-      const response = await fetch(endpoint + op, {
+      const requestedGeneration = generation
+      const send = () => fetch(endpoint + op, {
         method: 'POST',
         cache: 'no-store',
+        credentials: 'same-origin',
         signal: op === 'state'
           ? AbortSignal.any([stateRequest.signal, AbortSignal.timeout(70000)])
           : AbortSignal.timeout(25000),
@@ -252,14 +291,32 @@ export default function CloudflareStage({
         headers: { 'Content-Type': 'application/json', 'X-Whiterun-Peer': identity },
         body: JSON.stringify(input),
       })
+      let response = await send()
+      if (active && response.status === 401) {
+        if (requestedGeneration === generation) {
+          renewal ??= renew().finally(() => { renewal = undefined })
+          await renewal
+        }
+        if (!active) throw new Error('Sharing ended.')
+        response = await send()
+      }
       if (active && response.status === 410) {
         dispose()
         expired.current()
       }
       if (active && (response.status === 401 || response.status === 403)) {
-        dispose()
-        denied.current()
+        const failure = await response.json().catch(() => ({}))
+        if (active && op === 'publish' && failure?.reason === 'publish_forbidden') {
+          setPublishDenied(true)
+          remove(local)
+          setMessage('Your screen publishing permission ended. You can keep watching.')
+        } else if (active) {
+          dispose()
+          denied.current(response.status === 401 ? 'session_missing' : failure?.reason ?? 'authorization_denied')
+        }
       }
+      if (response.status >= 500 || response.status === 429 || response.status === 408)
+        throw new TemporaryControlError('Media connection unavailable.')
       if (!response.ok)
         throw new Error(
           response.status === 409
@@ -305,10 +362,9 @@ export default function CloudflareStage({
         if (windows) {
           remove(localAudio)
           setBrowserAudioStatus('')
-          setAudioEnabled(false)
         }
         sender.current = undefined
-        selectQuality({ fps: selectedQuality.current.fps, height: 0 })
+        selectQuality({ ...selectedQuality.current, height: 0 })
       }
       clearTimeout(flow.timeout)
       flow.pc.close()
@@ -380,11 +436,19 @@ export default function CloudflareStage({
               if (key === localAudio) {
                 const surface = flows.get(local)?.stream?.getVideoTracks()[0]?.getSettings().displaySurface
                 setBrowserAudioStatus(surface === 'browser' ? 'Sharing tab audio.' :
-                  surface === 'monitor' ? 'Sharing system audio, including sounds from other apps.' : 'Sharing picker audio. If you selected system audio, other apps are included.')
+                  surface === 'monitor' ? 'Sharing system audio, including sounds from other apps.' : 'Sharing selected application audio.')
               }
             })
-            .catch(() => {
+            .catch(error => {
               if (flows.get(key) !== flow) return
+              const retries = flow.readyRetries ?? 0
+              const temporary = error instanceof TemporaryControlError || error instanceof TypeError || error?.name === 'TimeoutError'
+              if (temporary && retries < 3) {
+                flow.announcing = false
+                flow.readyRetries = retries + 1
+                if (pc.connectionState === 'connected') flow.timeout = setTimeout(connectionChanged, 1000 * 2 ** retries)
+                return
+              }
               remove(key)
               if (key === localAudio) setBrowserAudioStatus('Video only. The controller could not mark screen audio ready.')
               if (key === local) setMessage('The controller could not mark the screen ready.')
@@ -425,7 +489,7 @@ export default function CloudflareStage({
         const stream = await navigator.mediaDevices.getDisplayMedia({
           video: { frameRate: { ideal: nativeTarget.fps, max: nativeTarget.fps } },
           audio: withAudio,
-          ...(withAudio && { systemAudio: 'include', windowAudio: 'window', selfBrowserSurface: 'exclude' }),
+          ...(withAudio && { systemAudio: 'include', windowAudio: 'window', selfBrowserSurface: 'exclude', surfaceSwitching: 'exclude' }),
         })
         if (flows.get(local) !== flow) {
           stream.getTracks().forEach((t) => t.stop())
@@ -435,7 +499,10 @@ export default function CloudflareStage({
         const [track] = stream.getVideoTracks()
         if (windows) {
           const audioTracks = stream.getAudioTracks()
-          const audio = withAudio ? audioTracks.find(t => t.readyState === 'live') : undefined
+          const surface = track.getSettings().displaySurface
+          const requiredLabel = chromiumAudioLabels[surface ?? '']
+          const audio = withAudio && requiredLabel
+            ? audioTracks.find(t => t.readyState === 'live' && t.label === requiredLabel) : undefined
           for (const extra of audioTracks) if (extra !== audio) extra.stop()
           flow.displayAudio = audio
           if (audio) {
@@ -446,14 +513,16 @@ export default function CloudflareStage({
               setBrowserAudioStatus('Video only. The browser stopped sharing audio.')
             }
           } else if (withAudio) {
-            setBrowserAudioStatus(missingAudio(track.getSettings().displaySurface))
+            const unavailable = surface === 'window' ? 'The browser did not identify application-only audio for this window.'
+              : 'The browser did not identify a live audio track for the selected surface.'
+            setBrowserAudioStatus(audioTracks.length ? 'Video only. ' + unavailable : missingAudio(surface))
           } else setBrowserAudioStatus('Video only. Share audio was off.')
         }
         track.onended = () => {
           if (flows.get(local) === flow) remove(local)
         }
         flow.cancelPublication = new AbortController()
-        if ('contentHint' in track) track.contentHint = 'motion'
+        if ('contentHint' in track) track.contentHint = selectedQuality.current.content ?? ''
         await publish(flow.pc, track, signal, { maxFramerate: selectedQuality.current.fps }, flow.cancelPublication.signal)
         if (!active || flows.get(local) !== flow) return
         publicationAnswered()
@@ -550,8 +619,7 @@ export default function CloudflareStage({
           setParticipants([])
           stateVersion = undefined
           delay = retryDelay
-          retryDelay = Math.min(60000, retryDelay * 2)
-          removeAll()
+          retryDelay = Math.min(flows.size ? 6000 : 60000, retryDelay * 2)
           setMessage('Media connection interrupted.')
         }
       } finally {
@@ -577,7 +645,7 @@ export default function CloudflareStage({
     return name || fallback
   }
   const audioNotice = browserAudioStatus || (windows && audioEnabled && !sharing
-    ? 'Choose audio in the browser picker. System audio can include other apps and notifications.' : '')
+    ? 'Choose audio in the browser picker. For a window, choose application audio. Entire Screen system audio can include other apps and notifications.' : '')
   return (<>
     <div className="player-stage" ref={stage}>
       {tiles.length ? (
@@ -617,8 +685,8 @@ export default function CloudflareStage({
         {focused && <button onClick={() => setFocus('')}>Back to grid</button>}
         <button aria-expanded={qualityOpen} onClick={() => { setAudioOpen(false); setQualityOpen(!qualityOpen) }}>Quality</button>
         {qualityOpen && <div className="player-popover quality-menu" role="region" aria-label="Quality controls">
-          <PublishQuality value={quality} settings={sender.current?.track?.getSettings?.()}
-            busy={busy || qualityBusy} sharing={sharing} onChange={target => void changeQuality(target)} />
+          {canPublish && !publishDenied && <PublishQuality contentControl value={quality} settings={sender.current?.track?.getSettings?.()}
+            busy={busy || qualityBusy} sharing={sharing} onChange={target => void changeQuality(target)} />}
           {media.map(m => {
             if (!m.pc) return null
             const own = m.key === local || m.key === localAudio
@@ -628,21 +696,21 @@ export default function CloudflareStage({
           })}
           {media.length > 0 && <small>{tiles.length} video tiles · {remoteScreens.length} remote screens</small>}
         </div>}
-        {canPublish && <button
+        {canPublish && !publishDenied && <button
           className="share-action"
           disabled={busy}
           onClick={() => (sharing ? stop.current() : start.current(windows && audioEnabled))}
         >
           {busy ? 'Opening picker…' : sharing ? 'Stop sharing' : 'Share my screen'}
         </button>}
-        {canPublish && <label className="share-audio-toggle">
+        {canPublish && !publishDenied && <label className="share-audio-toggle">
           <input
             type="checkbox"
             checked={audioEnabled}
             disabled={windows && (busy || sharing)}
             onChange={(e) => {
               setAudioEnabled(e.target.checked)
-              if (!windows) writeAudioPreference('whiterun.gameAudio.enabled', e.target.checked ? 'on' : 'off')
+              writeAudioPreference(windows ? 'screenShare.displayAudio' : 'whiterun.gameAudio.enabled', e.target.checked ? 'on' : 'off')
             }}
           />
           Share audio

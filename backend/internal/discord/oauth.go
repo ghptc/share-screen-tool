@@ -8,8 +8,8 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -23,6 +23,8 @@ type Session struct {
 	ID, User, DisplayName, Avatar string
 	Room, Epoch, Entry            string // Cloudflare room admission, pinned once per OAuth login.
 	Until                         time.Time
+	Correlation                   string
+	proof                         *identityProof
 }
 type transaction struct {
 	state, verifier, ref string
@@ -166,41 +168,170 @@ func (o *OAuth) avatar(ctx context.Context, user discordUser) string {
 	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(data)
 }
 
-func (o *OAuth) identity(ctx context.Context, code, verifier string) (discordUser, error) {
-	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {o.cfg.Origin + "/api/discord/callback"}, "code_verifier": {verifier}}
+// Only room sessions retain provider credentials. The per-login lock also
+// protects refresh-token rotation across the watchdog and browser requests.
+type oauthTokens struct {
+	Access  string `json:"access_token"`
+	Refresh string `json:"refresh_token"`
+	Type    string `json:"token_type"`
+	Seconds int64  `json:"expires_in"`
+}
+type identityProof struct {
+	mu                                           sync.Mutex
+	tokens                                       oauthTokens
+	accessUntil, checkAt, verifiedUntil, retryAt time.Time
+	backoff                                      time.Duration
+}
+
+func (o *OAuth) exchange(ctx context.Context, form url.Values) (oauthTokens, int) {
 	req, err := http.NewRequestWithContext(ctx, "POST", o.cfg.TokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return discordUser{}, err
+		return oauthTokens{}, 503
 	}
 	req.SetBasicAuth(o.cfg.ClientID, o.cfg.Secret)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	res, err := o.http.Do(req)
 	if err != nil {
-		return discordUser{}, err
+		return oauthTokens{}, 503
 	}
 	defer res.Body.Close()
-	var t struct {
-		Token string `json:"access_token"`
-		Type  string `json:"token_type"`
+	dec := json.NewDecoder(io.LimitReader(res.Body, 32768))
+	if res.StatusCode != 200 {
+		var failure struct {
+			Code string `json:"error"`
+		}
+		if dec.Decode(&failure) == nil && (failure.Code == "invalid_grant" || failure.Code == "access_denied") {
+			return oauthTokens{}, 403
+		}
+		return oauthTokens{}, 503
 	}
-	if res.StatusCode != 200 || json.NewDecoder(io.LimitReader(res.Body, 32768)).Decode(&t) != nil || t.Token == "" || !strings.EqualFold(t.Type, "bearer") {
-		return discordUser{}, errors.New("authorization exchange failed")
+	var t oauthTokens
+	if dec.Decode(&t) != nil || t.Access == "" || !strings.EqualFold(t.Type, "bearer") {
+		return oauthTokens{}, 503
 	}
-	req, err = http.NewRequestWithContext(ctx, "GET", o.cfg.UserURL, nil)
+	return t, 200
+}
+
+func (o *OAuth) user(ctx context.Context, access string) (discordUser, int) {
+	req, err := http.NewRequestWithContext(ctx, "GET", o.cfg.UserURL, nil)
 	if err != nil {
-		return discordUser{}, err
+		return discordUser{}, 503
 	}
-	req.Header.Set("Authorization", "Bearer "+t.Token)
-	res, err = o.http.Do(req)
+	req.Header.Set("Authorization", "Bearer "+access)
+	res, err := o.http.Do(req)
 	if err != nil {
-		return discordUser{}, err
+		return discordUser{}, 503
 	}
 	defer res.Body.Close()
-	var user discordUser
-	if res.StatusCode != 200 || json.NewDecoder(io.LimitReader(res.Body, 32768)).Decode(&user) != nil || !snowflake.MatchString(user.ID) {
-		return discordUser{}, errors.New("identity unavailable")
+	if res.StatusCode == 401 || res.StatusCode == 403 {
+		return discordUser{}, res.StatusCode
 	}
-	return user, nil
+	var u discordUser
+	if res.StatusCode != 200 || json.NewDecoder(io.LimitReader(res.Body, 32768)).Decode(&u) != nil || !snowflake.MatchString(u.ID) {
+		return discordUser{}, 503
+	}
+	return u, 200
+}
+
+const identityLifetime = 15 * time.Minute
+
+func (p *identityProof) install(t oauthTokens, now time.Time) {
+	if t.Refresh == "" {
+		t.Refresh = p.tokens.Refresh
+	}
+	p.tokens = t
+	p.accessUntil = time.Time{}
+	if t.Seconds > 0 && t.Seconds <= int64((365*24*time.Hour)/time.Second) {
+		ttl := time.Duration(t.Seconds) * time.Second
+		p.accessUntil = now.Add(ttl)
+	}
+}
+
+func (p *identityProof) verified(now time.Time) {
+	p.verifiedUntil = now.Add(identityLifetime)
+	if !p.accessUntil.IsZero() && p.accessUntil.Before(p.verifiedUntil) {
+		p.verifiedUntil = p.accessUntil
+	}
+	ttl := p.verifiedUntil.Sub(now)
+	p.checkAt = p.verifiedUntil.Add(-min(time.Minute, ttl/10))
+}
+func (p *identityProof) duringOutage(now time.Time) int {
+	if now.Before(p.verifiedUntil) {
+		return 200
+	}
+	return 503
+}
+
+func (o *OAuth) verifyIdentity(ctx context.Context, s Session, p *identityProof) int {
+	due := !p.accessUntil.IsZero() && !p.accessUntil.After(o.now().Add(time.Minute)) && p.tokens.Refresh != ""
+	if !due {
+		u, status := o.user(ctx, p.tokens.Access)
+		if status == 200 && u.ID != s.User {
+			return 403
+		}
+		if status != 401 {
+			return status
+		}
+		// Discord explicitly rejected this access token. Only a validated
+		// replacement can authorize another request.
+		p.verifiedUntil = time.Time{}
+	}
+	if p.tokens.Refresh == "" {
+		return 403
+	}
+	// Complete rotation even if the polling tab closed during this request.
+	// o.http has its own bounded timeout.
+	requestedAt := o.now()
+	t, status := o.exchange(context.WithoutCancel(ctx), url.Values{"grant_type": {"refresh_token"}, "refresh_token": {p.tokens.Refresh}})
+	if status != 200 {
+		return status
+	}
+	p.install(t, requestedAt)
+	u, status := o.user(ctx, t.Access)
+	if status == 401 || (status == 200 && u.ID != s.User) {
+		return 403
+	}
+	return status
+}
+
+// RenewIdentity revalidates a short identity lease within the fixed admission.
+// Callers independently require a fresh voice proof for every operation.
+func (o *OAuth) RenewIdentity(ctx context.Context, s Session) int {
+	p := s.proof
+	if p == nil {
+		return 401
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := o.Session(s.ID); !ok {
+		return 401
+	}
+	now := o.now()
+	if now.Before(p.retryAt) {
+		return p.duringOutage(now)
+	}
+	if now.Before(p.checkAt) {
+		return 200
+	}
+	status := o.verifyIdentity(ctx, s, p)
+	now = o.now()
+	switch status {
+	case 200:
+		p.verified(now)
+		p.backoff = 0
+		p.retryAt = time.Time{}
+	case 503:
+		p.backoff = min(30*time.Second, max(time.Second, 2*p.backoff))
+		p.retryAt = now.Add(p.backoff)
+	default:
+		o.Revoke(s.ID)
+	}
+	reason := map[int]string{200: "identity_renewed", 503: "identity_unavailable", 403: "identity_revoked"}[status]
+	slog.Info("room_identity", "session_correlation", s.Correlation, "reason", reason, "status", status)
+	if status == 503 {
+		return p.duringOutage(now)
+	}
+	return status
 }
 func (o *OAuth) callback(w http.ResponseWriter, r *http.Request) {
 	private(w)
@@ -219,9 +350,14 @@ func (o *OAuth) callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Login expired", 403)
 		return
 	}
-	user, err := o.identity(r.Context(), q.Get("code"), v.verifier)
-	if err != nil {
-		http.Error(w, "Discord login unavailable", 403)
+	requestedAt := o.now()
+	tokens, status := o.exchange(r.Context(), url.Values{"grant_type": {"authorization_code"}, "code": {q.Get("code")}, "redirect_uri": {o.cfg.Origin + "/api/discord/callback"}, "code_verifier": {v.verifier}})
+	var user discordUser
+	if status == 200 {
+		user, status = o.user(r.Context(), tokens.Access)
+	}
+	if status != 200 {
+		http.Error(w, "Discord login unavailable", status)
 		return
 	}
 	name := user.GlobalName
@@ -250,6 +386,10 @@ func (o *OAuth) callback(w http.ResponseWriter, r *http.Request) {
 	}
 	session := Session{ID: id, User: user.ID, DisplayName: name, Avatar: avatar, Until: now.Add(time.Hour)}
 	if o.roomLogin {
+		session.Correlation = rand.Text()
+		session.proof = &identityProof{}
+		session.proof.install(tokens, requestedAt)
+		session.proof.verified(now)
 		session.Room = v.ref
 		session.Until = now.Add(5 * time.Minute)
 	}

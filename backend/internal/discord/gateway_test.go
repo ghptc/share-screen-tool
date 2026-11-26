@@ -73,3 +73,35 @@ func TestMalformedVoiceTransitionInvalidatesSnapshot(t *testing.T) {
 		t.Fatal("stale voice snapshot retained")
 	}
 }
+
+func TestResumeRequiresCompleteReplayAndPreservesObservedDeparture(t *testing.T) {
+	var g Gateway
+	g.Observe(&dg.Event{Type: "READY", Sequence: 1})
+	g.Observe(&dg.Event{Sequence: 2, Struct: &dg.GuildCreate{Guild: &dg.Guild{ID: "11", Channels: []*dg.Channel{{ID: "22", Type: dg.ChannelTypeGuildVoice}}, VoiceStates: []*dg.VoiceState{{UserID: "33", ChannelID: "22"}}}}})
+	first, _ := g.Lookup("11", "33", time.Now())
+	g.Suspend()
+	if _, known := g.Lookup("11", "33", time.Now()); known {
+		t.Fatal("stale snapshot available")
+	}
+	g.Observe(&dg.Event{Type: "RESUMED", Sequence: 3})
+	if p, ok := g.Lookup("11", "33", time.Now()); !ok || p != first {
+		t.Fatal("continuous membership lost")
+	}
+	g.Suspend()
+	for i, ch := range []string{"", "22"} {
+		if !g.Observe(&dg.Event{Sequence: int64(4 + i), Struct: &dg.VoiceStateUpdate{VoiceState: &dg.VoiceState{GuildID: "11", UserID: "33", ChannelID: ch}}}) {
+			t.Fatal("replay failed")
+		}
+		if _, known := g.Lookup("11", "33", time.Now()); known {
+			t.Fatal("partial replay visible")
+		}
+	}
+	g.Observe(&dg.Event{Type: "RESUMED", Sequence: 6})
+	if p, ok := g.Lookup("11", "33", time.Now()); !ok || p.Epoch == first.Epoch {
+		t.Fatal("departure restored old admission")
+	}
+	g.Suspend()
+	if g.Observe(&dg.Event{Type: "RESUMED", Sequence: 8}) {
+		t.Fatal("accepted sequence gap")
+	}
+}

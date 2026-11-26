@@ -164,3 +164,15 @@ test('Access setup can expose only the shell before the pilot gets a private bin
     assert.equal(await readFile(legacy, 'utf8'), 'previous deployment config')
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
+
+test('forwards controller correlation and machine-readable denial without trusting a browser-supplied correlation', async () => {
+  requests = []
+  result = () => Response.json({reason: 'authorization_denied'}, {status: 403,
+    headers: {'X-Session-Correlation': 'controller-assigned'}})
+  const response = await get(api + ref + '/media/state', {method: 'POST', body: '{}',
+    headers: {Origin: origin, 'Content-Type': 'application/json', 'X-Session-Correlation': 'untrusted'}})
+  assert.equal(response.status, 403)
+  assert.equal(response.headers.get('X-Session-Correlation'), 'controller-assigned')
+  assert.equal(requests[0].headers.get('X-Session-Correlation'), null)
+  assert.equal((await response.json()).reason, 'authorization_denied')
+})

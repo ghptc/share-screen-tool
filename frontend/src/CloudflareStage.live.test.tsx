@@ -50,7 +50,7 @@ async function enterRoom() {
   vi.stubGlobal('RTCRtpReceiver', { getCapabilities: () => ({ codecs: [{ mimeType: 'audio/opus' }] }) })
   vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
   vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
-  const join = vi.fn(() => Response.json({ transport: 'cloudflare-prototype', identity: 'viewer',
+  const join = vi.fn<() => Response | Promise<Response>>(() => Response.json({ transport: 'cloudflare-prototype', identity: 'viewer',
     canPublish: false, serverTime: new Date(), expiresAt: new Date(Date.now() + 36_000_000) }))
   const owned = new Set<string>()
   let allocation = 0
@@ -98,9 +98,15 @@ async function enterRoom() {
     })
     await advance(1)
     expect(pending).toBeDefined()
-    expect(join).toHaveBeenCalledTimes(1)
   }
-  return { state, subscribe, answer, owned, join }
+  async function interrupt(status: number) {
+    await act(async () => {
+      pending!(new Response(null, { status }))
+      pending = undefined
+    })
+    if (status !== 401) version = undefined
+  }
+  return { state, subscribe, answer, owned, join, interrupt }
 }
 
 afterEach(() => {
@@ -228,4 +234,47 @@ it('closes a late allocation after replacement without answering it or disturbin
   expect(room.owned.has('late')).toBe(false)
   expect(room.answer).toHaveBeenCalledTimes(1)
   expect(videos().map(t => t.id)).toEqual(['new'])
+})
+
+it('preserves the same video, subscription and local mix through a Worker outage', async () => {
+  const room = await enterRoom()
+  const bob = { name: 'Bob', screen: 'b', audio: 'audio-b' }
+  await room.state('ready', bob)
+  const original = document.querySelector('video')
+  fireEvent.click(screen.getByRole('button', { name: 'Audio' }))
+  fireEvent.change(screen.getByLabelText('Bob audio volume'), { target: { value: '27' } })
+  await room.interrupt(503)
+  expect(screen.getByRole('alert')).toHaveTextContent('Media connection interrupted')
+  expect(document.querySelector('video')).toBe(original)
+  await advance(2500)
+  await room.state('recovered', bob)
+  expect(document.querySelector('video')).toBe(original)
+  expect(screen.getByLabelText<HTMLAudioElement>('Bob audio playback').volume).toBe(.27)
+  expect(room.subscribe).toHaveBeenCalledTimes(2)
+})
+
+it('rejoins the same admission on 401 without remounting, then tears down on authoritative 403', async () => {
+  const room = await enterRoom()
+  await room.state('ready', { name: 'Bob', screen: 'b' })
+  const original = document.querySelector('video')
+  await room.interrupt(401)
+  expect(room.join).toHaveBeenCalledTimes(2)
+  expect(document.querySelector('video')).toBe(original)
+  await room.interrupt(403)
+  expect(document.querySelector('video')).toBeNull()
+  expect(room.join).toHaveBeenCalledTimes(2)
+})
+
+it('coalesces simultaneous unauthorized subscriptions into one same-entry renewal', async () => {
+  const room = await enterRoom()
+  let finish!: (response: Response) => void
+  room.join.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+  room.subscribe.mockResolvedValueOnce(new Response(null, { status: 401 }))
+    .mockResolvedValueOnce(new Response(null, { status: 401 }))
+  await room.state('two', { name: 'A', screen: 'a' }, { name: 'B', screen: 'b' })
+  expect(room.join).toHaveBeenCalledTimes(2) // One admission, one outstanding renewal.
+  await act(async () => finish(Response.json({ identity: 'viewer' })))
+  expect(room.subscribe).toHaveBeenCalledTimes(4)
+  expect(videos().map(t => t.id).sort()).toEqual(['a', 'b'])
+  expect(room.join).toHaveBeenCalledTimes(2)
 })

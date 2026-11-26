@@ -73,3 +73,17 @@ test.each([true, false])('measures audio RTP and energy independently of video o
     packetsPerSecond: 50, bitrateBps: 4000, audioEnergyDelta: local ? .25 : .125, codec: 'audio/opus' })
   expect(measureMedia(current, undefined, local, 'audio').packetsPerSecond).toBeUndefined()
 })
+
+test('separates encoded frame cost, receiver buffering and concealed audio', () => {
+  const out: Partial<MediaStat> = { id: 'o', kind: 'video', type: 'outbound-rtp', framesEncoded: 10, totalEncodeTime: .1 }
+  const sent = measureMedia(sample({ ...out, timestamp: 2000, framesEncoded: 60, totalEncodeTime: .35,
+    keyFramesEncoded: 2 }), sample(out), true)
+  expect(sent.encodeMs).toBeCloseTo(5)
+  expect(sent.keyFrames).toBe(2)
+  const inbound: Partial<MediaStat> = { id: 'a', type: 'inbound-rtp', kind: 'audio', jitterBufferDelay: 1,
+    jitterBufferEmittedCount: 100, totalSamplesReceived: 100, concealedSamples: 10 }
+  const received = measureMedia(sample({ ...inbound, timestamp: 2000, jitterBufferDelay: 4,
+    jitterBufferEmittedCount: 200, totalSamplesReceived: 220, concealedSamples: 30 }), sample(inbound), false, 'audio')
+  expect(received).toMatchObject({ jitterBufferMs: 30, receivedSamples: 120, concealedSamples: 20 })
+  expect(measureMedia(sample(inbound), undefined, false, 'audio').jitterBufferMs).toBeUndefined()
+})

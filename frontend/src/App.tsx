@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ConnectionState, Room, RoomEvent } from 'livekit-client'
 import CloudflareStage from './CloudflareStage'
 import InvitationRooms from './InvitationRooms'
@@ -12,8 +12,19 @@ function Player({ channel }: {channel?: string}) {
   const [prototypePeer, setPrototypePeer] = useState<{identity: string; control: string; canPublish: boolean} | null>(null)
   const [state, setState] = useState('Connecting')
   const [error, setError] = useState('')
+  const [signIn, setSignIn] = useState(false)
   const expireCurrent = useRef<() => void>(() => {})
   const [attempt, setAttempt] = useState(0)
+  const denyRoom = useCallback((reason: string) => {
+    const login = reason === 'identity_revoked' || reason === 'session_missing'
+    setSignIn(login)
+    setPrototypePeer(null)
+    setState('Unavailable')
+    if (login) setError('Your room session ended. Sign in to request fresh access.')
+    else if (['voice_absent', 'voice_channel_changed', 'voice_epoch_changed'].includes(reason))
+      setError('Voice membership ended. Join the associated Discord voice channel to request fresh access.')
+    else setError('Access to this Discord room was denied.')
+  }, [])
   useEffect(() => {
     const controller = new AbortController()
     let entry = channel ? roomEntry(channel) : undefined
@@ -71,13 +82,13 @@ function Player({ channel }: {channel?: string}) {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...(entry && { 'X-Whiterun-Entry': entry.key }) },
           body: '{}',
-          cache: 'no-store',
+          cache: 'no-store', credentials: 'same-origin',
           signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]),
         })
         if (controller.signal.aborted || checkDeadline()) return
+        if (entry && response.status === 410) { expire(); return }
         if (entry?.deadline && response.status === 401) {
-          setState('Unavailable')
-          setError('Room authorization ended. Reopen the Discord link.')
+          denyRoom('session_missing')
           return
         }
         if (channel && response.status === 401) {
@@ -85,8 +96,13 @@ function Player({ channel }: {channel?: string}) {
           return
         }
         if (response.status === 403 || response.status === 404) {
-          setState('Unavailable')
-          setError(channel ? 'Connect to the associated Discord voice channel to watch.' : 'Local access is unavailable. Open the player from its localhost address.')
+          const failure = await response.json().catch(() => ({}))
+          if (controller.signal.aborted) return
+          if (channel) denyRoom(failure?.reason ?? 'authorization_denied')
+          else {
+            setState('Unavailable')
+            setError('Local access is unavailable. Open the player from its localhost address.')
+          }
           return
         }
         if (!response.ok) throw new Error()
@@ -134,7 +150,7 @@ function Player({ channel }: {channel?: string}) {
       window.clearTimeout(expiryTimer)
       disposeRoom()
     }
-  }, [attempt, channel])
+  }, [attempt, channel, denyRoom])
   return (
     <main className="player" aria-label="Screen Share player">
       <header className="player-header">
@@ -151,11 +167,7 @@ function Player({ channel }: {channel?: string}) {
           control={prototypePeer.control}
           canPublish={prototypePeer.canPublish}
           onExpired={() => expireCurrent.current()}
-          onDenied={() => {
-            setPrototypePeer(null)
-            setState('Unavailable')
-            setError('Connect to the associated Discord voice channel to watch.')
-          }}
+          onDenied={denyRoom}
         />
       ) : session ? (
         <ScreenSharing
@@ -168,9 +180,11 @@ function Player({ channel }: {channel?: string}) {
       ) : (
         <div className="player-empty">
           <span className="standby-screen" aria-hidden="true" />
-          <h2>{state === 'Expired' ? 'Session expired — reopen the link' : error ? 'Player unavailable' : state === 'Reconnecting' ? 'Reconnecting…' : 'Connecting…'}</h2>
+          <h2>{state === 'Expired' ? 'Session expired' : error ? 'Player unavailable' : state === 'Reconnecting' ? 'Reconnecting…' : 'Connecting…'}</h2>
           {error && state !== 'Expired' && <p role="alert">{error}</p>}
-          {state !== 'Expired' && (error || state === 'Reconnecting') && (
+          {channel && (state === 'Expired' || signIn) ? (
+            <a href={'/api/discord/auth/' + channel}>Sign in with Discord</a>
+          ) : state !== 'Expired' && (error || state === 'Reconnecting') && (
             <button onClick={() => (error ? location.reload() : setAttempt((n) => n + 1))}>
               Retry connection
             </button>

@@ -181,3 +181,23 @@ it('ignores a late participant update from the previous room', async () => {
   expect(screen.queryByText('Alice')).toBeNull()
   expect(screen.getByText('Bob')).toBeInTheDocument()
 })
+
+it('retries an interrupted ready acknowledgement without repeating the picker or allocation', async () => {
+  const { operations, changeConnection, fetch, track } = startScreen(candidate)
+  await act(() => vi.advanceTimersByTimeAsync(8000))
+  fetch.mockResolvedValueOnce(new Response(null, { status: 503 }))
+  await changeConnection('connected')
+  await act(() => vi.advanceTimersByTimeAsync(1000))
+  expect(fetch.mock.calls.filter(([url]) => url.endsWith('/ready'))).toHaveLength(2)
+  expect(operations.filter(op => op === 'publish')).toHaveLength(1)
+  expect(track.stop).not.toHaveBeenCalled()
+})
+
+it('withdraws publishing controls on a publish-only denial and preserves viewing permission', async () => {
+  const { track, onDenied } = startScreen(candidate, async () => Response.json({reason: 'publish_forbidden'}, {status: 403}))
+  await act(() => vi.advanceTimersByTimeAsync(8000))
+  expect(track.stop).toHaveBeenCalled()
+  expect(onDenied).not.toHaveBeenCalled()
+  expect(screen.queryByRole('button', { name: 'Share my screen' })).toBeNull()
+  expect(screen.getByRole('alert')).toHaveTextContent('You can keep watching')
+})

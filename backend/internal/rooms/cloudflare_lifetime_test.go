@@ -295,3 +295,104 @@ func TestFreshNavigationRequiresFreshOAuth(t *testing.T) {
 		t.Fatal("expired unrelated room session")
 	}
 }
+
+func TestResumeCannotConsumePendingLoginOrChangePeer(t *testing.T) {
+	f := newCFFixture(t, "https://player.test", &fakeMedia{})
+	cookie := f.login(t, "33")
+	resume := func(peer string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", "/discord/"+f.ref+"/join", strings.NewReader(`{"resumePeer":"`+peer+`"}`))
+		r.Header.Set("Origin", f.cfg.Origin)
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("X-Whiterun-Entry", "same-tab")
+		r.AddCookie(cookie)
+		res := httptest.NewRecorder()
+		f.api.ServeHTTP(res, r)
+		return res
+	}
+	if r := resume("stale"); r.Code != 401 {
+		t.Fatal("renewal consumed a fresh login")
+	}
+	code, b := f.post(t, cookie, "same-tab", f.ref, "join", cfInput{})
+	if code != 200 {
+		t.Fatal("initial admission failed")
+	}
+	if r := resume("different"); r.Code != 403 {
+		t.Fatal("renewal changed peer")
+	}
+	r := resume(b["identity"].(string))
+	correlation := r.Header().Get("X-Session-Correlation")
+	if r.Code != 200 || correlation == "" || correlation == cookie.Value || correlation == b["identity"] {
+		t.Fatal("invalid renewal correlation")
+	}
+	if got := resume(b["identity"].(string)).Header().Get("X-Session-Correlation"); got != correlation {
+		t.Fatal("unstable correlation")
+	}
+}
+
+func TestTokenRenewalPreservesAuthorizedSFUPublication(t *testing.T) {
+	media := &fakeMedia{}
+	f := newCFFixture(t, "https://player.test", media)
+	now := time.Now()
+	f.a.now = func() time.Time { return now }
+	cookie := f.login(t, "33")
+	_, join := f.post(t, cookie, "tab", f.ref, "join", cfInput{})
+	peer := join["identity"].(string)
+	_, pub := f.post(t, cookie, peer, f.ref, "publish", cfInput{Mid: "0", SDP: rosterVideo})
+	handle := pub["handle"].(string)
+	f.post(t, cookie, peer, f.ref, "ready", cfInput{Handle: handle})
+	// The fixture grants 60-second access tokens. Keep the 20-second track
+	// heartbeat valid while crossing two proactive token rotations.
+	for range 12 {
+		now = now.Add(10 * time.Second)
+		code, state := f.post(t, cookie, peer, f.ref, "state", cfInput{Handles: []string{handle}})
+		if code != 200 || len(state["owned"].([]any)) != 1 || state["owned"].([]any)[0] != handle {
+			t.Fatal("rotation lost existing track")
+		}
+		f.a.sweepCloudflare(t.Context(), false)
+	}
+	if media.count != 1 || media.closed != 0 {
+		t.Fatal("rotation replaced provider session")
+	}
+	f.voice(t, "33", "23")
+	if code, body := f.post(t, cookie, peer, f.ref, "state", cfInput{}); code != 403 || body["reason"] != "voice_channel_changed" {
+		t.Fatal("move retained access")
+	}
+	f.a.sweepCloudflare(t.Context(), false)
+	if media.closed != 1 {
+		t.Fatal("departure left active media")
+	}
+}
+
+type interruptedPublication struct {
+	fakeMedia
+	publishing chan struct{}
+	proceed    chan struct{}
+}
+
+func (m *interruptedPublication) Publish(context.Context, string, string, string, string) (string, error) {
+	close(m.publishing)
+	<-m.proceed
+	return "answer", nil
+}
+
+func TestDepartureDuringAllocationReturnsTerminalDenial(t *testing.T) {
+	m := &interruptedPublication{publishing: make(chan struct{}), proceed: make(chan struct{})}
+	f := newCFFixture(t, "https://player.test", m)
+	cookie := f.login(t, "33")
+	_, join := f.post(t, cookie, "tab", f.ref, "join", cfInput{})
+	code := make(chan int, 1)
+	go func() {
+		status, _ := f.post(t, cookie, join["identity"].(string), f.ref, "publish", cfInput{Mid: "0", SDP: rosterVideo})
+		code <- status
+	}()
+	<-m.publishing
+	f.voice(t, "33", "23")
+	close(m.proceed)
+	if <-code != 403 {
+		t.Fatal("departure reported as transient provider failure")
+	}
+	f.a.sweepCloudflare(t.Context(), false)
+	if m.closed != 1 {
+		t.Fatal("late provider allocation left open")
+	}
+}

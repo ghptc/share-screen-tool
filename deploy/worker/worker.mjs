@@ -16,6 +16,11 @@ function reject(status) {
   return new Response(null, { status, headers: privateHeaders })
 }
 
+function controllerUnavailable() {
+  console.warn(JSON.stringify({ event: 'player_proxy', reason: 'controller_unavailable', status: 503 }))
+  return Response.json({ reason: 'controller_unavailable' }, { status: 503, headers: privateHeaders })
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url)
@@ -40,7 +45,7 @@ export default {
       return reject(404)
     }
     if (!completing && url.search) return reject(400)
-    if (!env.CONTROLLER) return reject(503)
+    if (!env.CONTROLLER) return controllerUnavailable()
     const headers = new Headers()
     for (const name of ['Content-Type', 'Origin', 'Authorization', 'X-Whiterun-Entry', 'X-Whiterun-Peer']) {
       if (request.headers.has(name)) headers.set(name, request.headers.get(name))
@@ -65,13 +70,13 @@ export default {
         if (!valid || target.username || target.password || target.hash) return reject(502)
       }
       const output = new Headers(privateHeaders)
-      for (const name of ['Content-Type', 'Location', 'Retry-After']) {
+      for (const name of ['Content-Type', 'Location', 'Retry-After', 'X-Session-Correlation']) {
         if (result.headers.has(name)) output.set(name, result.headers.get(name))
       }
       for (const cookie of result.headers.getSetCookie()) output.append('Set-Cookie', cookie)
       return new Response(result.body, { status: result.status, headers: output })
     } catch {
-      return reject(503)
+      return controllerUnavailable()
     }
   },
 }

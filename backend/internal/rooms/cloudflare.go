@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"regexp"
@@ -101,10 +100,10 @@ func singleMedia(raw, mid, direction, kind string) bool {
 	}
 	return count == 1
 }
-func (a *API) cfOwner(r *http.Request) (roomAccess, string, int) {
+func (a *API) cfOwner(r *http.Request) (roomAccess, string, int, string) {
 	d := a.discord
 	if r.Header.Get("Origin") != d.c.Origin {
-		return roomAccess{}, "", 403
+		return roomAccess{}, "", 403, "origin_denied"
 	}
 	id, ref := r.Header.Get("X-Whiterun-Peer"), r.PathValue("ref")
 	d.mu.Lock()
@@ -112,16 +111,19 @@ func (a *API) cfOwner(r *http.Request) (roomAccess, string, int) {
 	d.mu.Unlock()
 	s, authenticated := d.oauth.RoomEntry(r, b.entry)
 	if !authenticated {
-		return roomAccess{}, "", 401
+		return roomAccess{}, "", 401, "session_missing"
 	}
 	if !ok || b.ref != ref || b.session != s.ID {
-		return roomAccess{}, "", 403
+		return roomAccess{}, "", 403, "peer_mismatch"
 	}
 	if !b.mediaRequests.Allow() {
-		return roomAccess{}, "", 429
+		return b, id, 429, "rate_limited"
 	}
-	b, status := a.checkDiscord(r.Context(), "dc-"+ref, id)
-	return b, id, status
+	checked, status, reason := a.checkDiscord(r.Context(), "dc-"+ref, id)
+	if status != 200 {
+		return b, id, status, reason
+	}
+	return checked, id, status, reason
 }
 func (g *cfRegistry) reserve(b roomAccess, id string, in cfInput, now time.Time, helper *nativeSession) (*cfTrack, int) {
 	g.mu.Lock()
@@ -252,20 +254,27 @@ func (a *API) cfNew(w http.ResponseWriter, r *http.Request, b roomAccess, id str
 		g.mu.Lock()
 		p := g.tracks[in.Publication]
 		g.mu.Unlock()
+		sourceStatus := http.StatusNotFound
 		if p != nil {
-			if _, ok := a.validDiscord(ctx, "dc-"+b.ref, p.owner); ok {
+			_, proof, _ := a.checkDiscord(ctx, "dc-"+b.ref, p.owner)
+			if proof == 200 {
 				p.operation.Lock()
 				publisherSession = p.session
 				p.operation.Unlock()
+			} else if proof == 503 {
+				sourceStatus = 503
 			}
 		}
 		if publisherSession == "" {
-			err = errors.New("publisher unavailable")
+			g.mu.Lock()
+			g.retireLocked(t)
+			g.mu.Unlock()
+			fail(w, sourceStatus, "Publisher unavailable")
+			return
 		}
 	}
-	if err == nil {
-		t.session, err = g.media.NewSession(ctx)
-	}
+	t.session, err = g.media.NewSession(ctx)
+
 	if err == nil {
 		if send {
 			t.mid = in.Mid
@@ -274,17 +283,22 @@ func (a *API) cfNew(w http.ResponseWriter, r *http.Request, b roomAccess, id str
 			t.mid, desc, err = g.media.Subscribe(ctx, t.session, publisherSession, in.Publication)
 		}
 	}
-	_, authorized := a.validDiscord(ctx, "dc-"+b.ref, id)
-	if helper != nil {
-		_, ok := a.cfHelper(r)
-		authorized = authorized && ok
+	_, proof, reason := a.checkDiscord(ctx, "dc-"+b.ref, id)
+	if helper != nil && proof == 200 {
+		if _, ok := a.cfHelper(r); !ok {
+			proof, reason = 403, "helper_revoked"
+		}
 	}
 	g.mu.Lock()
-	if err != nil || !authorized || r.Context().Err() != nil {
+	if err != nil || proof != 200 || r.Context().Err() != nil {
 		g.retireLocked(t)
 	}
 	closed := t.closing
 	g.mu.Unlock()
+	if proof != 200 {
+		roomAuthFailure(w, proof, reason, "Discord authorization required")
+		return
+	}
 	if closed {
 		fail(w, 502, "Media negotiation ended")
 		return
@@ -292,9 +306,12 @@ func (a *API) cfNew(w http.ResponseWriter, r *http.Request, b roomAccess, id str
 	write(w, 200, map[string]string{"handle": t.handle, "sdp": desc})
 }
 func (a *API) cfSignal(w http.ResponseWriter, r *http.Request) {
-	b, id, status := a.cfOwner(r)
+	b, id, status, reason := a.cfOwner(r)
+	if b.correlation != "" {
+		w.Header().Set("X-Session-Correlation", b.correlation)
+	}
 	if status != 200 {
-		fail(w, status, "Discord voice authorization required")
+		roomAuthFailure(w, status, reason, "Discord voice authorization required")
 		return
 	}
 	var in cfInput
@@ -309,7 +326,7 @@ func (a *API) cfSignal(w http.ResponseWriter, r *http.Request) {
 	switch op {
 	case "publish", "subscribe":
 		if op == "publish" && !a.discord.canPublish(b.user) {
-			fail(w, 403, "Screen publishing permission required")
+			roomAuthFailure(w, 403, "publish_forbidden", "Screen publishing permission required")
 			return
 		}
 		a.cfNew(w, r, b, id, in, op == "publish", nil)
@@ -426,9 +443,9 @@ func (a *API) cfHelperPublish(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, "Audio authorization ended")
 		return
 	}
-	b, ok := a.validDiscord(r.Context(), s.Owner.Room, s.Owner.Identity)
-	if !ok {
-		fail(w, 403, "Voice authorization ended")
+	b, status, reason := a.checkDiscord(r.Context(), s.Owner.Room, s.Owner.Identity)
+	if status != 200 {
+		roomAuthFailure(w, status, reason, "Voice authorization ended")
 		return
 	}
 	var in cfInput

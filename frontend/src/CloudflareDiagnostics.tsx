@@ -61,6 +61,8 @@ export default function CloudflareDiagnostics({ pc, local, audio, label, stream,
             `${track.readyState} · ${track.enabled ? 'enabled' : 'disabled'} · ${track.muted ? 'muted' : 'unmuted'}`])
           next.push([local ? 'Packets sent/s' : 'Packets received/s', number(m.packetsPerSecond)],
             [local ? 'Source energy Δ' : 'Received audio energy Δ', number(m.audioEnergyDelta, 6)])
+          if (!local) next.push(['Received / concealed samples Δ', `${number(m.receivedSamples, 0)} / ${number(m.concealedSamples, 0)}`],
+            ['Jitter buffer (ms/sample)', number(m.jitterBufferMs)])
           if (element) next.push(['Local playback', `${element.paused ? 'Paused' : 'Playing'} · ${element.muted ? 'muted' : Math.round(element.volume * 100) + '%'}`])
         } else if (local) {
           const settings = sender?.track?.getSettings()
@@ -70,6 +72,8 @@ export default function CloudflareDiagnostics({ pc, local, audio, label, stream,
             ['Encoded size / sender FPS limit', `${size(m.width, m.height)} / ${number(encoding?.maxFramerate)}`],
             ['Bitrate cap (kb/s)', encoding && encoding.maxBitrate === undefined ? 'No explicit cap' : kbps(encoding?.maxBitrate)],
             ['Encoder target / estimated uplink (kb/s)', `${kbps(m.targetBps)} / ${kbps(m.availableBps)}`],
+            ['Content hint / sender degradation preference', `${sender?.track?.contentHint || 'Automatic'} / ${sender?.getParameters().degradationPreference ?? 'Browser default'}`],
+            ['Keyframes encoded / encode ms per frame', `${number(m.keyFrames, 0)} / ${number(m.encodeMs)}`],
             ['Encoder / quality limitation', `${m.encoder ?? unknown} / ${m.limitation ?? unknown}`])
         } else {
           const video = element as HTMLVideoElement | undefined
@@ -79,6 +83,7 @@ export default function CloudflareDiagnostics({ pc, local, audio, label, stream,
           if (video) lastVideo = video
           playback = quality
           next.push(['Received / decoded / displayed FPS', [m.transportFps, m.fps, fps].map(n => number(n)).join(' / ')],
+            ['Keyframes decoded / jitter buffer ms per frame', `${number(m.keyFrames, 0)} / ${number(m.jitterBufferMs)}`],
             ['Decoded size', size(m.width, m.height)],
             ['Receiver frame interval SD (ms)', number(m.frameIntervalDeviationMs)],
             ['Receiver drops / freezes (totals)', `${number(m.dropped, 0)} / ${number(m.freezes, 0)}`],

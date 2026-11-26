@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -30,6 +31,7 @@ type roomAccess struct {
 	session, ref, user, epoch, name     string
 	displayName, avatar, participantKey string
 	lastSeen, voiceChecked              time.Time
+	correlation                         string
 	entry                               string // idempotency key for one browser navigation
 	until                               time.Time
 	publishing                          bool
@@ -97,15 +99,15 @@ func (d *channelAccess) canPublish(user string) bool {
 	return d.c.PilotUsers == nil || d.c.PilotUsers[user]
 }
 
-func (d *channelAccess) epoch(ctx context.Context, ref, user string) (string, int) {
+func (d *channelAccess) epoch(ctx context.Context, ref, user string) (string, int, string) {
 	ch, ok := d.c.Dir.Lookup(ref)
 	if !ok || d.c.Blocked[user] {
-		return "", http.StatusForbidden
+		return "", http.StatusForbidden, "room_denied"
 	}
 	body, _ := json.Marshal(map[string]string{"Guild": ch.Guild, "User": user})
 	req, err := http.NewRequestWithContext(ctx, "POST", d.c.VoiceURL+"/voice", bytes.NewReader(body))
 	if err != nil {
-		return "", http.StatusServiceUnavailable
+		return "", http.StatusServiceUnavailable, "voice_unavailable"
 	}
 	// This POST is a read. If an idle connection closes, Go can retry on a
 	// fresh connection within the same timeout and still require a live proof.
@@ -114,20 +116,20 @@ func (d *channelAccess) epoch(ctx context.Context, ref, user string) (string, in
 	req.Header.Set("Content-Type", "application/json")
 	res, err := d.client.Do(req)
 	if err != nil {
-		return "", http.StatusServiceUnavailable
+		return "", http.StatusServiceUnavailable, "voice_unavailable"
 	}
 	defer res.Body.Close()
 	var p discord.Presence
 	if res.StatusCode == http.StatusNoContent {
-		return "", http.StatusForbidden
+		return "", http.StatusForbidden, "voice_absent"
 	}
 	if res.StatusCode != 200 || json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&p) != nil || p.Epoch == "" || p.Channel == "" {
-		return "", http.StatusServiceUnavailable
+		return "", http.StatusServiceUnavailable, "voice_unavailable"
 	}
 	if p.Channel != ch.Voice {
-		return "", http.StatusForbidden
+		return "", http.StatusForbidden, "voice_channel_changed"
 	}
-	return p.Epoch, http.StatusOK
+	return p.Epoch, http.StatusOK, ""
 }
 func (a *API) discordJoin(w http.ResponseWriter, r *http.Request) {
 	d := a.discord
@@ -135,8 +137,10 @@ func (a *API) discordJoin(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, "Origin not allowed")
 		return
 	}
-	var empty struct{}
-	if !decode(w, r, &empty) {
+	var input struct {
+		ResumePeer string `json:"resumePeer,omitempty"`
+	}
+	if !decode(w, r, &input) {
 		return
 	}
 	ref := r.PathValue("ref")
@@ -153,11 +157,18 @@ func (a *API) discordJoin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s, ok = d.oauth.RoomEntry(r, entry)
+		if ok {
+			w.Header().Set("X-Session-Correlation", s.Correlation)
+		}
 	} else {
 		s, ok = d.oauth.Current(r)
 	}
 	if !ok {
-		fail(w, 401, "Discord sign-in required")
+		roomAuthFailure(w, 401, "session_missing", "Discord sign-in required")
+		return
+	}
+	if input.ResumePeer != "" && (a.prototype == nil || s.Epoch == "") {
+		roomAuthFailure(w, 401, "session_missing", "Previous admission unavailable")
 		return
 	}
 	if a.prototype != nil && s.Epoch != "" {
@@ -170,21 +181,29 @@ func (a *API) discordJoin(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		d.mu.Unlock()
+		if input.ResumePeer != "" && input.ResumePeer != peer {
+			roomAuthFailure(w, 403, "peer_mismatch", "Previous admission unavailable")
+			return
+		}
 		if peer != "" {
-			if _, status := a.checkDiscord(r.Context(), "dc-"+ref, peer); status != 200 {
-				fail(w, status, "Discord voice authorization required")
+			if _, status, reason := a.checkDiscord(r.Context(), "dc-"+ref, peer); status != 200 {
+				roomAuthFailure(w, status, reason, "Discord voice authorization required")
 				return
 			}
 			a.cfJoined(w, s, peer, a.prototype.controlFor(peer))
 			return
 		}
 	}
-	epoch, status := d.epoch(r.Context(), ref, s.User)
+	epoch, status, reason := d.epoch(r.Context(), ref, s.User)
 	if status != 200 {
-		fail(w, status, "Connect to this Discord voice channel to watch")
+		roomAuthFailure(w, status, reason, "Connect to this Discord voice channel to watch")
 		return
 	}
 	if a.prototype != nil {
+		if status := d.oauth.RenewIdentity(r.Context(), s); status != 200 {
+			roomAuthFailure(w, status, identityReason(status), "Discord identity authorization required")
+			return
+		}
 		if s, ok = d.oauth.AdmitRoom(s.ID, ref, epoch, entry); !ok {
 			fail(w, 403, "Room authorization ended")
 			return
@@ -219,6 +238,8 @@ func (a *API) discordJoin(w http.ResponseWriter, r *http.Request) {
 	access := roomAccess{proofMu: new(sync.Mutex), controlHash: sha256.Sum256([]byte(control)), session: s.ID, ref: ref, user: s.User, epoch: epoch, name: "Screen " + randomID(3), until: s.Until}
 	if a.prototype != nil {
 		access.mediaRequests = rate.NewLimiter(5, 20)
+		access.correlation = s.Correlation
+		slog.Info("room_access", "session_correlation", s.Correlation, "reason", "room_admitted", "status", 200)
 		access.entry = entry
 		access.displayName, access.avatar = s.DisplayName, s.Avatar
 		access.participantKey = a.prototype.controlFor("roster:" + ref + ":" + s.User)
@@ -239,7 +260,36 @@ func (a *API) discordJoin(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, map[string]any{"token": "session", "identity": identity, "roomId": room, "serverUrl": d.c.Origin + "/api/discord/signal/" + identity, "canPublish": true, "nativeAudioControl": control})
 }
 
+func identityReason(status int) string {
+	switch status {
+	case 401:
+		return "session_missing"
+	case 403:
+		return "identity_revoked"
+	default:
+		return "identity_unavailable"
+	}
+}
+func authReason(status int) string {
+	switch status {
+	case 401:
+		return "session_missing"
+	case 403:
+		return "authorization_denied"
+	case 410:
+		return "session_expired"
+	case 429:
+		return "rate_limited"
+	default:
+		return "authority_unavailable"
+	}
+}
+func roomAuthFailure(w http.ResponseWriter, status int, reason, message string) {
+	write(w, status, map[string]string{"error": message, "reason": reason})
+}
+
 func (a *API) cfJoined(w http.ResponseWriter, s discord.Session, id, control string) {
+	w.Header().Set("X-Session-Correlation", s.Correlation)
 	a.discord.oauth.WriteRoomCookie(w, s)
 	write(w, 200, map[string]any{"transport": "cloudflare-prototype", "canPublish": a.discord.canPublish(s.User), "identity": id, "nativeAudioControl": control, "expiresAt": s.Until, "serverTime": a.now()})
 }
@@ -322,54 +372,68 @@ func (a *API) discordToken(room, id string, b roomAccess) (string, error) {
 	return auth.NewAccessToken(a.cfg.APIKey, a.cfg.APISecret).SetIdentity(id).SetName(b.name).SetVideoGrant(grant).SetValidFor(discordTTL).ToJWT()
 }
 func (a *API) validDiscord(ctx context.Context, room, id string) (roomAccess, bool) {
-	b, status := a.checkDiscord(ctx, room, id)
+	b, status, _ := a.checkDiscord(ctx, room, id)
 	return b, status == http.StatusOK
 }
 
-func (a *API) checkDiscord(ctx context.Context, room, id string) (roomAccess, int) {
+func (a *API) checkDiscord(ctx context.Context, room, id string) (roomAccess, int, string) {
 	d := a.discord
 	if d == nil {
-		return roomAccess{}, 403
+		return roomAccess{}, 403, "room_denied"
 	}
 	d.mu.Lock()
 	b, ok := d.active[id]
 	d.mu.Unlock()
 	if !ok || room != "dc-"+b.ref {
-		return roomAccess{}, 403
+		return roomAccess{}, 403, "room_denied"
 	}
 
 	// Serialize proofs for this peer so a delayed reply cannot restore stale access.
 	b.proofMu.Lock()
 	defer b.proofMu.Unlock()
-	status := http.StatusForbidden
+	status := http.StatusUnauthorized
+	reason := "session_missing"
 	confirmedDeparture := false
-	if _, ok := d.oauth.Session(b.session); ok {
-		epoch, proof := d.epoch(ctx, b.ref, b.user)
+	if session, ok := d.oauth.Session(b.session); ok {
+		epoch, proof, voiceReason := d.epoch(ctx, b.ref, b.user)
 		status = proof
+		reason = voiceReason
 		if proof == 200 && epoch != b.epoch {
 			status = 403
+			reason = "voice_epoch_changed"
 		}
 		confirmedDeparture = status == 403
-		if !a.now().Before(b.until) {
-			status = 403
+		if status == 200 && a.prototype != nil {
+			status = d.oauth.RenewIdentity(ctx, session)
+			if status != 200 {
+				reason = identityReason(status)
+			}
 		}
-		if ctx.Err() != nil && a.now().Before(b.until) && proof == 503 {
-			return roomAccess{}, 503
+		if ctx.Err() != nil && status == 503 && a.now().Before(b.until) {
+			return roomAccess{}, 503, reason
 		}
 	}
+	if !a.now().Before(b.until) {
+		status = 410
+		reason = "session_expired"
+	}
+
 	d.mu.Lock()
 	b, ok = d.active[id]
 	if !ok {
 		d.mu.Unlock()
-		return roomAccess{}, 403
+		return roomAccess{}, 403, "room_denied"
 	}
 	if status == 200 {
 		if a.prototype != nil {
+			if b.voiceChecked.IsZero() {
+				slog.Info("room_access", "session_correlation", b.correlation, "reason", "proof_restored", "status", 200)
+			}
 			b.voiceChecked = a.now()
 			d.active[id] = b
 		}
 		d.mu.Unlock()
-		return b, 200
+		return b, 200, ""
 	}
 
 	// An unavailable authority denies all media, but the fixed admission can
@@ -379,7 +443,7 @@ func (a *API) checkDiscord(ctx context.Context, room, id string) (roomAccess, in
 	if suspended {
 		if b.voiceChecked.IsZero() {
 			d.mu.Unlock()
-			return roomAccess{}, 503
+			return roomAccess{}, 503, reason
 		}
 		b.voiceChecked = time.Time{}
 		d.active[id] = b
@@ -398,10 +462,13 @@ func (a *API) checkDiscord(ctx context.Context, room, id string) (roomAccess, in
 		}
 	}
 	d.mu.Unlock()
+	if a.prototype != nil {
+		slog.Info("room_access", "session_correlation", b.correlation, "reason", reason, "status", status)
+	}
 	for peer, grant := range affected {
 		a.endDiscordMedia(room, peer, grant, suspended)
 	}
-	return roomAccess{}, status
+	return roomAccess{}, status, reason
 }
 
 func (a *API) endDiscordMedia(room, id string, b roomAccess, suspended bool) {
